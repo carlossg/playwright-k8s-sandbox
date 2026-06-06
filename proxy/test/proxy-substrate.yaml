@@ -39,6 +39,13 @@ spec:
             - { name: SUBSTRATE_API_ENDPOINT,    value: "api.ate-system.svc.cluster.local:443" }
             - { name: SUBSTRATE_ROUTER_ADDR,     value: "atenet-router.ate-system.svc.cluster.local:80" }
             - { name: SUBSTRATE_ACTOR_TEMPLATE,  value: "ACTOR_TEMPLATE" }
+            # Substrate's snapshot restore (golden + per-actor) is broken in
+            # this environment: the pause sandbox restores cleanly but the
+            # app sub-container ends in `stopped` state with no process.
+            # Boot-from-spec is reliable, so force it for cold-starts. The
+            # tradeoff is that we lose snapshot-based fast resume — every
+            # cold-start has to bring up Node + Chromium from scratch.
+            - { name: SUBSTRATE_FORCE_BOOT,      value: "true" }
             - { name: SANDBOX_PORT,              value: "80" }
             - { name: IDLE_TTL,                  value: "10m" }
             - { name: IDLE_CHECK_INTERVAL,       value: "30s" }

@@ -48,6 +48,13 @@ type Config struct {
 	// SubstrateActorTemplate is "namespace/name" of an ActorTemplate (substrate backend only).
 	SubstrateActorTemplate string
 
+	// SubstrateForceBoot, when true, passes Boot=true to substrate's ResumeActor
+	// so it boots from the ActorTemplate spec instead of restoring from a
+	// snapshot. Workaround for substrate environments where snapshot restore is
+	// unreliable (e.g. when checkpoint pause + restore pause/sub-container
+	// leaves the app sub-container in `stopped` state).
+	SubstrateForceBoot bool
+
 	// IdleTTL is how long a session must be idle (no traffic AND no open connections) before reaping.
 	IdleTTL time.Duration
 
@@ -70,6 +77,7 @@ func FromEnv() (*Config, error) {
 		SubstrateAPIEndpoint:   envOr("SUBSTRATE_API_ENDPOINT", "api.ate-system.svc.cluster.local:443"),
 		SubstrateRouterAddr:    envOr("SUBSTRATE_ROUTER_ADDR", "atenet-router.ate-system.svc.cluster.local:80"),
 		SubstrateActorTemplate: os.Getenv("SUBSTRATE_ACTOR_TEMPLATE"),
+		SubstrateForceBoot:     envOr("SUBSTRATE_FORCE_BOOT", "") == "true",
 	}
 
 	port, err := strconv.Atoi(envOr("SANDBOX_PORT", "9222"))

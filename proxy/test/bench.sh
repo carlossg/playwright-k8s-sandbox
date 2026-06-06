@@ -305,11 +305,20 @@ suspend_substrate_actor() {
   for _ in $(seq 1 30); do
     local st
     st=$(kubectl-ate --context kind-kind get actor "pw-$id" 2>/dev/null | awk 'NR==2 {print $4}')
-    [ "$st" = STATUS_SUSPENDED ] && return 0
+    [ "$st" = STATUS_SUSPENDED ] && break
     sleep 2
   done
-  warn "[substrate] actor pw-$id did not reach STATUS_SUSPENDED"
-  return 1
+  if [ "$st" != STATUS_SUSPENDED ]; then
+    warn "[substrate] actor pw-$id did not reach STATUS_SUSPENDED"
+    return 1
+  fi
+  # Out-of-band suspend leaves the proxy with a stale cached session — restart
+  # it so the next request re-Ensures (calls ResumeActor + the upstream
+  # readiness probe) instead of forwarding to atenet against a not-yet-ready
+  # upstream.
+  kubectl --context kind-kind -n pw-substrate rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl --context kind-kind -n pw-substrate rollout status  deploy/playwright-proxy --timeout=120s >/dev/null
+  wait_for_proxy_ready pw-substrate kind-kind
 }
 
 bench_substrate() {

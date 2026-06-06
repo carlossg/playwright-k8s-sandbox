@@ -60,6 +60,13 @@ type Substrate struct {
 	atenetRouterHost  string
 	atenetRouterPort  int
 	probeClient       *http.Client
+	// forceBoot, if true, passes Boot=true to ResumeActor so substrate skips
+	// the snapshot restore path and boots from the ActorTemplate spec instead.
+	// Substrate's snapshot restore (golden + per-actor) currently fails to
+	// bring the app sub-container's process tree back — the sandbox restores
+	// but `runsc list` shows the sub-container in `stopped` state with no
+	// pid. Boot-from-spec is reliable; this is the working fallback.
+	forceBoot bool
 }
 
 // NewSubstrate dials the ate-api-server's gRPC endpoint and returns a backend
@@ -67,7 +74,15 @@ type Substrate struct {
 // proxy is expected to talk to ate-api-server via TLS but the certs are
 // self-signed inside the cluster, hence InsecureSkipVerify (consistent with
 // kubectl-ate's behavior).
+// NewSubstrate is the convenience constructor that defaults forceBoot=false.
 func NewSubstrate(apiEndpoint, atenetRouterAddr, actorTemplateRef string) (*Substrate, error) {
+	return NewSubstrateWithOptions(apiEndpoint, atenetRouterAddr, actorTemplateRef, false)
+}
+
+// NewSubstrateWithOptions exposes the forceBoot toggle. When forceBoot=true,
+// ResumeActor is always called with Boot=true, skipping substrate's broken
+// snapshot restore path.
+func NewSubstrateWithOptions(apiEndpoint, atenetRouterAddr, actorTemplateRef string, forceBoot bool) (*Substrate, error) {
 	if apiEndpoint == "" {
 		return nil, fmt.Errorf("apiEndpoint required")
 	}
@@ -96,6 +111,7 @@ func NewSubstrate(apiEndpoint, atenetRouterAddr, actorTemplateRef string) (*Subs
 		actorTemplateName: tname,
 		atenetRouterHost:  host,
 		atenetRouterPort:  port,
+		forceBoot:         forceBoot,
 		probeClient: &http.Client{
 			Timeout: 2 * time.Second,
 			Transport: &http.Transport{
@@ -230,7 +246,7 @@ func (s *Substrate) waitForRunning(ctx context.Context, id string, actor *ateapi
 			return actor, nil
 		case ateapipb.Actor_STATUS_SUSPENDED:
 			if !resumed {
-				if _, err := s.control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{ActorId: id}); err != nil {
+				if _, err := s.control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{ActorId: id, Boot: s.forceBoot}); err != nil {
 					st, _ := status.FromError(err)
 					// FailedPrecondition can happen if the actor just left
 					// SUSPENDED between our Get and Resume — fall through and
