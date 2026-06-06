@@ -1,0 +1,41 @@
+# Per-namespace RBAC. Apply this in every namespace where the proxy is deployed,
+# with NAMESPACE substituted. The proxy only needs Role (not ClusterRole) because
+# it watches pods and sandbox CRs in its own namespace only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+rules:
+  # Pod informer: identify the calling agent pod by its playwright-id label.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # SandboxClaim backend (covers agent-sandbox and openshell).
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  # Substrate backend. Drop this rule if you don't use it.
+  - apiGroups: ["ate.dev"]
+    resources: ["actors"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+subjects:
+  - kind: ServiceAccount
+    name: playwright-proxy
+    namespace: NAMESPACE
+roleRef:
+  kind: Role
+  name: playwright-proxy
+  apiGroup: rbac.authorization.k8s.io

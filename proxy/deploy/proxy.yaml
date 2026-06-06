@@ -1,0 +1,101 @@
+# Per-namespace proxy Deployment + Service. Agents in the same namespace address
+# the proxy as `playwright-proxy:9000`. NAMESPACE and image tag must be substituted.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: playwright-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: playwright-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-proxy
+        # Belt-and-suspenders: this label matches the default ingress selector
+        # of the agent-sandbox auto-managed NetworkPolicy. When the example
+        # SandboxTemplates set networkPolicyManagement: Unmanaged it has no
+        # effect, but it keeps the proxy working if a template flips back to
+        # Managed without other adjustments.
+        app: sandbox-router
+    spec:
+      serviceAccountName: playwright-proxy
+      containers:
+        - name: proxy
+          image: ghcr.io/carlossg/playwright-k8s-sandbox/proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: data
+              containerPort: 9000
+            - name: mgmt
+              containerPort: 9090
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: BACKEND
+              value: "sandboxclaim"     # or "substrate"
+            - name: WARMPOOL_NAME
+              value: "playwright"        # agent-sandbox SandboxWarmPool name
+            # - name: SANDBOX_TEMPLATE_NAME
+            #   value: "playwright"      # defaults to WARMPOOL_NAME
+            - name: SANDBOX_PORT
+              value: "9222"              # Playwright server / MCP port
+            - name: IDLE_TTL
+              value: "10m"
+            - name: IDLE_CHECK_INTERVAL
+              value: "30s"
+            - name: ENSURE_TIMEOUT
+              value: "30s"
+            # Substrate-only:
+            # - name: SUBSTRATE_ROUTER_ADDR
+            #   value: "atenet-router.ate-system.svc.cluster.local:80"
+            # - name: SUBSTRATE_ACTOR_TEMPLATE
+            #   value: "ate-playwright/server"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mgmt
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mgmt
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532   # distroless 'nonroot' UID
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: playwright-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: playwright-proxy
+  ports:
+    - name: data
+      port: 9000
+      targetPort: data

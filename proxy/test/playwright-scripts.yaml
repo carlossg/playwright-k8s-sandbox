@@ -1,0 +1,77 @@
+# client.js runs in the test Job. The sandbox-side server.js is baked into
+# the slim image (proxy/test/playwright-substrate.Dockerfile) so this
+# ConfigMap only carries the client-side script.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: playwright-scripts
+  namespace: NAMESPACE
+data:
+  client.js: |
+    // Drives a real page fetch through the proxy:
+    //   - WS connect to ws://playwright-proxy:9000/ goes through our proxy to the sandbox.
+    //   - chromium.connect speaks Playwright protocol over that WS.
+    //   - page.goto issues a real HTTP GET from inside the sandbox to TARGET_URL.
+    //     We point it at an in-cluster traefik/whoami so the response includes the
+    //     target Pod's hostname, which we assert client-side. This proves the
+    //     proxy didn't just upgrade WS — the headless browser actually fetched
+    //     a page and parsed the response.
+    // Bench-friendly client: emits a single line "BENCH <json>" with timing
+    // breakdown so the harness can grep + parse from `kubectl logs`.
+    const { chromium } = require('playwright');
+    const URL    = process.env.PW_URL;
+    const ID     = process.env.PW_ID || 'unknown';
+    const TARGET = process.env.PW_TARGET_URL || 'http://test-target/';
+    // Retry chromium.connect briefly on 403 — there's a small window where
+    // the proxy's pod informer hasn't yet seen this pod's IP via WATCH, even
+    // though the Job has already started running our binary. Bound the retry
+    // so we don't mask real misconfiguration.
+    // chromium.connect's default timeout is 30s; cold-start substrate restores
+    // from a snapshot which can take >30s, during which the proxy holds the
+    // WS upgrade. Give the connect itself a 3-minute timeout so the client
+    // doesn't drop while the proxy is legitimately waiting on the actor.
+    const CONNECT_TIMEOUT_MS = Number(process.env.PW_CONNECT_TIMEOUT_MS || '180000');
+    async function connectWithRetry(url, deadlineMs = 15000) {
+      const deadline = Date.now() + deadlineMs;
+      for (;;) {
+        try { return await chromium.connect(url, { timeout: CONNECT_TIMEOUT_MS }); }
+        catch (e) {
+          const msg = String(e && e.message || e);
+          if (Date.now() < deadline && /403|Forbidden|not labelled/.test(msg)) {
+            await new Promise(r => setTimeout(r, 500));
+            continue;
+          }
+          throw e;
+        }
+      }
+    }
+    (async () => {
+      const t0 = Date.now();
+      const browser = await connectWithRetry(URL);
+      const t1 = Date.now();
+      const ctx = await browser.newContext();
+      const page = await ctx.newPage();
+      const t2 = Date.now();
+      const resp = await page.goto(TARGET, { waitUntil: 'load', timeout: 30000 });
+      const t3 = Date.now();
+      if (!resp || !resp.ok()) {
+        console.error('FAIL [' + ID + '] page.goto status=' + (resp && resp.status()));
+        process.exit(1);
+      }
+      const body = await page.content();
+      const m = body.match(/Hostname:\s*([^<\s]+)/);
+      if (!m) {
+        console.error('FAIL [' + ID + '] no Hostname in body:', body.slice(0, 200));
+        process.exit(1);
+      }
+      const timing = {
+        id: ID,
+        connect_ms: t1 - t0,
+        newPage_ms: t2 - t1,
+        goto_ms:    t3 - t2,
+        total_ms:   t3 - t0,
+        hostname:   m[1],
+      };
+      console.log('BENCH ' + JSON.stringify(timing));
+      await browser.close();
+    })().catch((e) => { console.error('error:', e && e.stack || e); process.exit(2); });

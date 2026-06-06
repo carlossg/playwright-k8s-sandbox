@@ -1,0 +1,38 @@
+# Real Playwright client Job for substrate. Mirrors test/playwright-client-job.yaml
+# but lives in pw-substrate. Hits the substrate-backed playwright-proxy with
+# chromium.connect + page.goto and asserts the body comes back.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-CLIENTID
+  namespace: pw-substrate
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-e2e-client
+        playwright-id: CLIENTID
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: client
+          image: localhost:5001/playwright-substrate:slim-1.49.1
+          imagePullPolicy: Never
+          command: ["node", "/scripts/client.js"]
+          env:
+            - { name: NODE_PATH,                value: /usr/local/lib/node_modules }
+            - { name: PLAYWRIGHT_BROWSERS_PATH, value: /ms-playwright }
+            - { name: PW_URL,                   value: "ws://playwright-proxy:9000/" }
+            - { name: PW_ID,                    value: "CLIENTID" }
+            - { name: PW_TARGET_URL,            value: "http://test-target.pw-substrate.svc.cluster.local/" }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: playwright-scripts

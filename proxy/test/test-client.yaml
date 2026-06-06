@@ -1,0 +1,19 @@
+# Labelled client pod used to exercise the proxy. Two pods with different
+# playwright-id labels prove the per-id routing: each lands on a distinct sandbox.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-CLIENTID
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: playwright-test-client
+    playwright-id: CLIENTID
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits:   { cpu: 100m, memory: 64Mi }

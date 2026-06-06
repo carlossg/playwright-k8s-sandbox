@@ -1,0 +1,11 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: playwright-openshell
+  namespace: NAMESPACE
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: playwright-openshell
+  updateStrategy:
+    type: OnReplenish

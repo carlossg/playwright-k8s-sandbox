@@ -1,0 +1,38 @@
+# Lightweight upstream used by the smoke test in place of the real Playwright image.
+# traefik/whoami is ~5MB, supports HTTP and WebSocket, and echoes back the pod's
+# hostname so we can verify routing landed on the right sandbox pod.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  # The agent-sandbox controller auto-creates a NetworkPolicy that only allows
+  # ingress from pods labelled app=sandbox-router. The smoke test keeps things
+  # simple by disabling that policy entirely. In deploy/examples/ the proxy
+  # carries the app=sandbox-router label instead, which works with the default.
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: NAME
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10
+          args: ["--port=8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 1
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532

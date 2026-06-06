@@ -1,0 +1,11 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: NAME
+  updateStrategy:
+    type: OnReplenish

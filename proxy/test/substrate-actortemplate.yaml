@@ -1,0 +1,33 @@
+# ActorTemplate that backs the substrate smoke test. The 'containers' field
+# follows the same shape as a plain Kubernetes Pod container; substrate's atelet
+# launches it inside a gVisor sandbox per actor.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  # runsc URLs and hashes match substrate's counter demo at time of writing;
+  # bump these alongside substrate's pinned releases.
+  runsc:
+    amd64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"
+      sha256Hash: "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63"
+    arm64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc"
+      sha256Hash: "1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9"
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: whoami
+      # substrate's controller pins images by digest to keep snapshots valid.
+      image: traefik/whoami:v1.10@sha256:1699d99cb4b9acc17f74ca670b3d8d0b7ba27c948b3445f0593b58ebece92f04
+      command: ["/whoami"]
+      ports:
+        - containerPort: 8080
+  workerPoolRef:
+    namespace: NAMESPACE
+    name: NAME
+  snapshotsConfig:
+    # rustfs is the in-cluster S3-compatible bucket service substrate's kind
+    # install spins up; the install script pre-creates an 'ate-snapshots' bucket.
+    location: s3://ate-snapshots/playwright-NAME/

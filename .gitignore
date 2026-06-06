@@ -1,0 +1,8 @@
+# Sibling-repo symlinks used during local development
+/agent-sandbox
+/OpenShell
+/substrate
+/kars
+
+# Logs
+*.log

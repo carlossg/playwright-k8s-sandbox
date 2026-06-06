@@ -1,0 +1,64 @@
+# OpenShell backend: same agent-sandbox SandboxClaim machinery as the
+# agent-sandbox flavour, but conceptually the sandbox image is OpenShell-based.
+# The OpenShell community provides a "base" sandbox image with Playwright
+# already installed (https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base).
+#
+# In this example we reuse the slim Playwright image shared by all three
+# backends (built from proxy/test/playwright-substrate.Dockerfile) as a
+# stand-in, so the e2e harness can exercise the OpenShell code path without
+# building two browser images. In a real OpenShell deployment, build the
+# OpenShell-Community base image with Playwright on top and reference that
+# image here instead.
+#
+# NOTE: The `localhost:5001/...` reference works inside our kind-local
+# harness, which builds the image and pre-loads it into the cluster's
+# containerd. For a real deployment, push the image to a registry your
+# cluster can pull from and replace the image reference below.
+#
+# Configure the proxy with BACKEND=sandboxclaim and WARMPOOL_NAME=playwright-openshell.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: playwright-openshell
+  namespace: NAMESPACE
+spec:
+  # See agent-sandbox sandboxtemplate.yaml for the rationale: disable the
+  # auto-managed NetworkPolicy and let the proxy own ingress.
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-openshell
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      containers:
+        - name: playwright
+          image: localhost:5001/playwright-substrate:slim-1.49.1
+          command: ["node", "/server.js"]
+          env:
+            - name: NODE_PATH
+              value: /usr/local/lib/node_modules
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /ms-playwright
+            - name: PORT
+              value: "9222"
+            - name: CHROMIUM_ARGS
+              # --single-process is needed under gVisor (substrate) but breaks
+              # newPage under regular containerd; drop it here.
+              value: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu"
+          ports:
+            - name: playwright
+              containerPort: 9222
+          readinessProbe:
+            tcpSocket:
+              port: 9222
+            periodSeconds: 2
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false

@@ -1,0 +1,45 @@
+# ActorTemplate that runs the baked Playwright image inside a gVisor actor.
+# Built from test/playwright-substrate.Dockerfile and pushed to the local
+# registry the substrate kind cluster reads from. The harness handles the
+# build/push and substitutes PLAYWRIGHT_IMAGE with the pinned digest.
+#
+# Chromium runs with --no-sandbox + --single-process to fit gVisor; rationale
+# is in test/playwright-substrate-server.js.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  runsc:
+    amd64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"
+      sha256Hash: "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63"
+    arm64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc"
+      sha256Hash: "1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9"
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: playwright
+      image: PLAYWRIGHT_IMAGE
+      command: ["node", "/server.js"]
+      # substrate's atelet does not propagate the image's Dockerfile ENV into
+      # the container's environment (it only sets PATH explicitly + whatever
+      # is listed here). Set NODE_PATH so node can find the globally-installed
+      # playwright module at runtime.
+      env:
+        - name: NODE_PATH
+          value: /usr/local/lib/node_modules
+        - name: PLAYWRIGHT_BROWSERS_PATH
+          value: /ms-playwright
+      ports:
+        # atenet-router hardcodes port 80 as the upstream port; the workload
+        # must listen on 80 regardless of what the proxy advertises.
+        - containerPort: 80
+  workerPoolRef:
+    namespace: NAMESPACE
+    name: NAME
+  snapshotsConfig:
+    # Versioned path so we don't pick up a broken/partial snapshot from an
+    # earlier ActorTemplate that had a different containers spec.
+    location: s3://ate-snapshots/playwright-NAME-v2/

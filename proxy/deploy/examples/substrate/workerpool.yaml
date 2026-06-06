@@ -1,0 +1,19 @@
+# Substrate backend: requires substrate ("ate.dev") installed in the cluster.
+# Substrate's installation is heavier — see https://github.com/agent-substrate/substrate
+# and its hack/install-ate-kind.sh. Once ate-system is up, apply these manifests in
+# the proxy's namespace and configure:
+#   BACKEND=substrate
+#   SUBSTRATE_ROUTER_ADDR=atenet-router.ate-system.svc.cluster.local:80
+#   SUBSTRATE_ACTOR_TEMPLATE=playwright
+#
+# NOTE: substrate's ActorTemplate requires a snapshots bucket. Most realistic
+# deployments use GCS (gs://...); for kind-local, point at a MinIO/rustfs bucket
+# (rustfs ships with the substrate kind install).
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: playwright-workerpool
+  namespace: NAMESPACE
+spec:
+  replicas: 2
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/servers/ateom-gvisor

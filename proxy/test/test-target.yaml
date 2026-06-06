@@ -1,0 +1,42 @@
+# In-cluster HTTP target used by the Playwright e2e. The headless browser inside
+# the sandbox does a real network fetch against this Service; the client asserts
+# the response body to confirm the page actually came back.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-target
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: test-target
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: test-target
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10
+          args: ["--port=80"]
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            tcpSocket: { port: 80 }
+            periodSeconds: 1
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-target
+  namespace: NAMESPACE
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: test-target
+  ports:
+    - { port: 80, targetPort: 80 }

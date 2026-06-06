@@ -1,0 +1,54 @@
+# Real Playwright SandboxTemplate used by the e2e harness mode.
+#
+# The container runs the baked slim image (built from
+# proxy/test/playwright-substrate.Dockerfile) which launches a Chromium
+# WebSocket server on the port given by PORT. server.js is baked into the
+# image; no ConfigMap mount required.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: NAME
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      containers:
+        - name: playwright
+          # Shared slim image; tag is the kind-local registry. The harness
+          # builds + loads it into the kind cluster, so imagePullPolicy=Never.
+          image: localhost:5001/playwright-substrate:slim-1.49.1
+          imagePullPolicy: Never
+          command: ["node", "/server.js"]
+          env:
+            # atelet/agent-sandbox don't propagate the image's Dockerfile ENV;
+            # set NODE_PATH so node can find the globally-installed playwright.
+            - name: NODE_PATH
+              value: /usr/local/lib/node_modules
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /ms-playwright
+            - name: PORT
+              value: "9222"
+            - name: CHROMIUM_ARGS
+              # --single-process is required under gVisor (substrate) but breaks
+              # browserContext.newPage() under regular containerd because the
+              # renderer can't fork; drop it for agent-sandbox/openshell.
+              value: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu"
+          ports:
+            - name: playwright
+              containerPort: 9222
+          readinessProbe:
+            tcpSocket: { port: 9222 }
+            periodSeconds: 2
+            initialDelaySeconds: 10
+            failureThreshold: 60
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false

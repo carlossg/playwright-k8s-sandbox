@@ -1,0 +1,48 @@
+# Labelled Job that drives Playwright through the proxy. The Job's Pod carries
+# the playwright-id label so the proxy can resolve it on the source IP path.
+#
+# Uses the same slim image as the sandbox (playwright + Chromium baked in) but
+# only needs the client-side `playwright` npm module. The /scripts ConfigMap
+# mount provides client.js (distinct from the baked server.js in the image).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-e2e-CLIENTID
+  namespace: NAMESPACE
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-e2e-client
+        playwright-id: CLIENTID
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: client
+          image: localhost:5001/playwright-substrate:slim-1.49.1
+          imagePullPolicy: Never
+          command: ["node", "/scripts/client.js"]
+          env:
+            # Dockerfile ENV isn't propagated by every runtime; set explicitly
+            # so node finds the globally-installed playwright npm module.
+            - name: NODE_PATH
+              value: /usr/local/lib/node_modules
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /ms-playwright
+            - name: PW_URL
+              value: "ws://playwright-proxy:9000/"
+            - name: PW_ID
+              value: "CLIENTID"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: playwright-scripts

@@ -1,0 +1,9 @@
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  replicas: 2
+  # Pushed by substrate's hack/install-ate-kind.sh. Substituted by the harness.
+  ateomImage: ATEOM_IMAGE

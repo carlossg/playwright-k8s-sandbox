@@ -1,0 +1,42 @@
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: playwright
+  namespace: NAMESPACE
+spec:
+  workerPoolRef:
+    name: playwright-workerpool
+    namespace: NAMESPACE
+  # runsc is required by substrate's gVisor-backed atelet. URLs/hashes change with
+  # substrate releases — these come from substrate's demo manifests at the time of
+  # writing; consult substrate's manifests/ate-install for the current pinned set.
+  runsc:
+    amd64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"
+      sha256Hash: "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63"
+    arm64:
+      url: "gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc"
+      sha256Hash: "1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9"
+  pauseImage: "registry.k8s.io/pause:3.10.2"
+  containers:
+    - name: playwright
+      # Slim image shared with the agent-sandbox and OpenShell backends; built
+      # from proxy/test/playwright-substrate.Dockerfile and pinned by sha256
+      # (substrate requires digest pinning so snapshots remain valid).
+      # Substrate's atelet does not propagate Dockerfile ENV — set NODE_PATH
+      # and PLAYWRIGHT_BROWSERS_PATH explicitly via env below.
+      image: localhost:5001/playwright-substrate@sha256:REPLACE_WITH_DIGEST_FROM_YOUR_BUILD
+      command: ["node", "/server.js"]
+      env:
+        - { name: NODE_PATH,                value: /usr/local/lib/node_modules }
+        - { name: PLAYWRIGHT_BROWSERS_PATH, value: /ms-playwright }
+        # atenet-router hardcodes the upstream port to :80; the workload must
+        # listen on 80 regardless of what the proxy advertises.
+        - { name: PORT,                     value: "80" }
+        - { name: CHROMIUM_ARGS,            value: "--no-sandbox,--disable-setuid-sandbox,--single-process,--disable-dev-shm-usage,--disable-gpu" }
+      ports:
+        - containerPort: 80
+  snapshotsConfig:
+    # Replace with your bucket. For substrate-local kind clusters, this is
+    # typically a rustfs bucket served by the substrate stack.
+    location: "s3://snapshots/playwright/"

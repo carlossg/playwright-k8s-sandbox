@@ -1,0 +1,59 @@
+# agent-sandbox backend: SandboxTemplate running the slim Playwright image
+# (~500 MiB pushed) shared with the OpenShell and substrate backends.
+#
+# Image is built from proxy/test/playwright-substrate.Dockerfile and runs an
+# env-driven Chromium WebSocket server baked in as /server.js.
+#
+# NOTE: The `localhost:5001/...` reference works inside our kind-local
+# harness, which builds the image and pre-loads it into the cluster's
+# containerd. For a real deployment, build this image and push it to a
+# registry your cluster can pull from, then replace the image reference here.
+#
+# Configure the proxy with BACKEND=sandboxclaim and WARMPOOL_NAME=playwright.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: playwright
+  namespace: NAMESPACE
+spec:
+  # The agent-sandbox controller auto-creates a NetworkPolicy that only allows
+  # ingress from pods labelled app=sandbox-router. The proxy already routes
+  # traffic and we don't want that policy in the path; disable it here and rely
+  # on standard cluster NetworkPolicies if needed.
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-sandbox
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      containers:
+        - name: playwright
+          image: localhost:5001/playwright-substrate:slim-1.49.1
+          command: ["node", "/server.js"]
+          env:
+            # Dockerfile ENV isn't always propagated; set NODE_PATH so node
+            # can find the globally-installed playwright module.
+            - name: NODE_PATH
+              value: /usr/local/lib/node_modules
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /ms-playwright
+            - name: PORT
+              value: "9222"
+            - name: CHROMIUM_ARGS
+              # --single-process is needed under gVisor (substrate) but breaks
+              # newPage under regular containerd; drop it here.
+              value: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu"
+          ports:
+            - name: playwright
+              containerPort: 9222
+          readinessProbe:
+            tcpSocket:
+              port: 9222
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false

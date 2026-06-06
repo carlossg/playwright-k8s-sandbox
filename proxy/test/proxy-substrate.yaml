@@ -1,0 +1,77 @@
+# Proxy Deployment configured for the substrate backend. Used by harness.sh
+# test substrate; identical to deploy/proxy.yaml except for the env block.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: playwright-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: playwright-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-proxy
+    spec:
+      serviceAccountName: playwright-proxy
+      containers:
+        - name: proxy
+          image: PROXY_IMAGE
+          imagePullPolicy: Never
+          ports:
+            - { name: data, containerPort: 9000 }
+            - { name: mgmt, containerPort: 9090 }
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - { name: BACKEND, value: "substrate" }
+            - { name: SUBSTRATE_API_ENDPOINT,    value: "api.ate-system.svc.cluster.local:443" }
+            - { name: SUBSTRATE_ROUTER_ADDR,     value: "atenet-router.ate-system.svc.cluster.local:80" }
+            - { name: SUBSTRATE_ACTOR_TEMPLATE,  value: "ACTOR_TEMPLATE" }
+            - { name: SANDBOX_PORT,              value: "80" }
+            - { name: IDLE_TTL,                  value: "10m" }
+            - { name: IDLE_CHECK_INTERVAL,       value: "30s" }
+            # Substrate cold-starts (CreateActor + ResumeActor + restore from
+            # snapshot) can take significantly longer than agent-sandbox; give
+            # the wait-for-RUNNING loop enough headroom that the client sees
+            # latency, not a 502.
+            - { name: ENSURE_TIMEOUT,            value: "180s" }
+          readinessProbe:
+            httpGet: { path: /readyz, port: mgmt }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: mgmt }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: playwright-proxy
+  ports:
+    - { name: data, port: 9000, targetPort: data }
