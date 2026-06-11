@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/backend"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/identify"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/session"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/backend"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/identify"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/session"
 )
 
 type Handler struct {

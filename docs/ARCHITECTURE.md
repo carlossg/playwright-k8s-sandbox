@@ -35,10 +35,10 @@ and KarsSandbox uses Azure's KARS controller for isolated namespace-scoped sandb
 
 | Layer                       | Source                                | Responsibility |
 |-----------------------------|---------------------------------------|----------------|
-| `proxy/internal/identify`   | client-go shared informer on labelled pods + API list fallback | `podIP → playwright-id` lookup with cache-miss fallback to a `fieldSelector=status.podIP=X` API list. Bounded polling (100ms × 100) covers the pod-IP-not-yet-populated race. |
-| `proxy/internal/session`    | Map keyed by playwright-id            | `Ensure` is singleflight per id; `Get` returns the cached endpoint or waits on the in-flight Ensure. Reaper sweeps idle sessions when both `lastActive` and `activeConns` say it's safe. |
-| `proxy/internal/backend`    | `Backend` interface (Ensure/Delete/List) | Four implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev), `KarsSandbox` (Azure KARS). |
-| `proxy/cmd/playwright-proxy`| `main.go`                             | Wires it together. `/readyz` blocks until `identify.Index.Ready()` (i.e. the informer cache has synced) so kube probes don't admit traffic before pod identity is resolvable. |
+| `internal/identify`   | client-go shared informer on labelled pods + API list fallback | `podIP → playwright-id` lookup with cache-miss fallback to a `fieldSelector=status.podIP=X` API list. Bounded polling (100ms × 100) covers the pod-IP-not-yet-populated race. |
+| `internal/session`    | Map keyed by playwright-id            | `Ensure` is singleflight per id; `Get` returns the cached endpoint or waits on the in-flight Ensure. Reaper sweeps idle sessions when both `lastActive` and `activeConns` say it's safe. |
+| `internal/backend`    | `Backend` interface (Ensure/Delete/List) | Four implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev), `KarsSandbox` (Azure KARS). |
+| `cmd/playwright-proxy`| `main.go`                             | Wires it together. `/readyz` blocks until `identify.Index.Ready()` (i.e. the informer cache has synced) so kube probes don't admit traffic before pod identity is resolvable. |
 
 ## Identity model
 
@@ -390,22 +390,22 @@ rules:
   verbs: ["get", "list"]  # To locate pod IP after KarsSandbox is Running
 ```
 
-See `proxy/deploy/examples/kars/` for complete deployment manifests including
+See `deploy/examples/kars/` for complete deployment manifests including
 proxy configuration, RBAC patches, and InferencePolicy examples.
 
 **Testing:**
 ```bash
 # Create KARS cluster with controller
-./proxy/test/harness.sh up-kars
+./test/harness.sh up-kars
 
 # Run integration tests
-./proxy/test/harness.sh test kars
+./test/harness.sh test kars
 
 # Run benchmarks (cold/warm/restore)
-./proxy/test/bench.sh kars
+./test/bench.sh kars
 
 # Cleanup
-./proxy/test/harness.sh down-kars
+./test/harness.sh down-kars
 ```
 
 ## Bench harness and results
@@ -467,15 +467,15 @@ Reading the numbers:
 
 ```sh
 # Bring up all kind clusters (one-time per machine)
-./proxy/test/harness.sh up                            # 'playwright-proxy' cluster for sandboxclaim
+./test/harness.sh up                            # 'playwright-proxy' cluster for sandboxclaim
 ( cd substrate && hack/create-kind-cluster.sh \
     && hack/install-ate-kind.sh --deploy-ate-system ) # 'kind' cluster for substrate
-./proxy/test/harness.sh up-kars                       # KARS cluster with controller
+./test/harness.sh up-kars                       # KARS cluster with controller
 
 # Run the full bench
-./proxy/test/bench.sh all                             # agent-sandbox + openshell + substrate
-./proxy/test/bench.sh substrate                       # substrate only
-./proxy/test/bench.sh kars                            # KARS only
+./test/bench.sh all                             # agent-sandbox + openshell + substrate
+./test/bench.sh substrate                       # substrate only
+./test/bench.sh kars                            # KARS only
 ```
 
 `bench.sh` does a `kubectl-ate admin debug-flush-redis` and a worker recycle

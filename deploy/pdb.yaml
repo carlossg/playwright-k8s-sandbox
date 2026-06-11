@@ -1,0 +1,12 @@
+# PodDisruptionBudget ensures at least one proxy pod is available during
+# voluntary disruptions (node drains, cluster upgrades, etc.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: playwright-proxy

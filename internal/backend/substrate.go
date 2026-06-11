@@ -26,7 +26,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/backend/ateapipb"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/backend/ateapipb"
 )
 
 // readyPollInterval is how often Ensure polls GetActor while waiting for the

@@ -1,4 +1,4 @@
-module github.com/carlossg/playwright-k8s-sandbox/proxy
+module github.com/carlossg/playwright-k8s-sandbox
 
 go 1.25.0
 

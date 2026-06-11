@@ -1,0 +1,39 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+README*
+docs/
+deploy/examples/
+
+# Testing
+test/
+*_test.go
+*.test
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.o
+*.a
+*.so
+bin/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

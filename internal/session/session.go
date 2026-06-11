@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/backend"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/backend"
 )
 
 type Session struct {

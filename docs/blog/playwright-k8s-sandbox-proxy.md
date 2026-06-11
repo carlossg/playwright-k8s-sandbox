@@ -259,7 +259,7 @@ base ClusterRole:
   verbs: ["get", "list"]  # To locate pod IP after KarsSandbox is Running
 ```
 
-See `proxy/deploy/examples/kars/` for complete deployment manifests including
+See `deploy/examples/kars/` for complete deployment manifests including
 proxy configuration, RBAC patches, and InferencePolicy examples.
 
 ## The numbers
@@ -350,10 +350,10 @@ quotas matter, or when targeting Azure's runtime sandbox extensions.
 ```sh
 git clone https://github.com/carlossg/playwright-k8s-sandbox
 cd playwright-k8s-sandbox
-./proxy/test/harness.sh up         # spin up the agent-sandbox kind cluster
-./proxy/test/harness.sh up-kars    # spin up the KARS kind cluster
-./proxy/test/bench.sh all          # run cold/warm/restore against all backends
-./proxy/test/bench.sh kars         # run KARS-specific benchmarks
+./test/harness.sh up         # spin up the agent-sandbox kind cluster
+./test/harness.sh up-kars    # spin up the KARS kind cluster
+./test/bench.sh all          # run cold/warm/restore against all backends
+./test/bench.sh kars         # run KARS-specific benchmarks
 ```
 
 For substrate you'll also need its own kind cluster and the ate.dev
@@ -364,10 +364,10 @@ methodology — is at [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 KARS test harness commands:
 ```sh
-./proxy/test/harness.sh up-kars      # Create KARS cluster with controller
-./proxy/test/harness.sh test kars    # Run integration tests
-./proxy/test/bench.sh kars           # Run cold/warm/restore benchmarks
-./proxy/test/harness.sh down-kars    # Cleanup
+./test/harness.sh up-kars      # Create KARS cluster with controller
+./test/harness.sh test kars    # Run integration tests
+./test/bench.sh kars           # Run cold/warm/restore benchmarks
+./test/harness.sh down-kars    # Cleanup
 ```
 
 If you're picking a Kubernetes sandboxing technology for a new

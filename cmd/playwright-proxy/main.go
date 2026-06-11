@@ -14,11 +14,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/backend"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/config"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/identify"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/proxy"
-	"github.com/carlossg/playwright-k8s-sandbox/proxy/internal/session"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/backend"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/config"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/identify"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/proxy"
+	"github.com/carlossg/playwright-k8s-sandbox/internal/session"
 )
 
 func main() {

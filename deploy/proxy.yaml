@@ -29,9 +29,17 @@ spec:
         app: sandbox-router
     spec:
       serviceAccountName: playwright-proxy
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: proxy
-          image: ghcr.io/carlossg/playwright-k8s-sandbox/proxy:latest
+          image: docker.io/csanchez/playwright-k8s-sandbox:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: data
@@ -77,12 +85,15 @@ spec:
             limits:   { cpu: 500m, memory: 256Mi }
           securityContext:
             allowPrivilegeEscalation: false
+            privileged: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65532   # distroless 'nonroot' UID
             runAsGroup: 65532
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
 ---
 apiVersion: v1
 kind: Service
