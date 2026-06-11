@@ -1,0 +1,56 @@
+# playwright-proxy configured for the karssandbox backend.
+# Each playwright-id gets one KarsSandbox CR (runtime: BYO) that the kars
+# controller runs in a dedicated namespace (kars-pw-<id>).
+#
+# Prerequisites:
+#   1. kars controller installed (helm install kars deploy/helm/kars)
+#   2. InferencePolicy CR deployed: kubectl apply -f inferencepolicy.yaml
+#   3. Playwright image built and pushed to your registry
+#
+# The proxy needs RBAC to create/delete/list KarsSandbox CRs in its namespace
+# and to list pods in kars-* namespaces. Extend proxy/deploy/rbac.yaml with
+# the rules in rbac-patch.yaml alongside this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playwright-proxy
+  template:
+    metadata:
+      labels:
+        app: playwright-proxy
+    spec:
+      serviceAccountName: playwright-proxy
+      containers:
+        - name: proxy
+          image: localhost:5001/playwright-proxy:latest
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: BACKEND
+              value: karssandbox
+            - name: KARS_INFERENCE_REF
+              value: playwright
+            - name: KARS_SANDBOX_IMAGE
+              value: YOUR_REGISTRY/playwright:TAG
+            - name: SANDBOX_PORT
+              value: "9222"
+            - name: IDLE_TTL
+              value: "10m"
+          ports:
+            - name: data
+              containerPort: 9000
+            - name: mgmt
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9090
+            periodSeconds: 5

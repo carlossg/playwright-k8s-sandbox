@@ -1,0 +1,9 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kars-playwright
+# Single-node cluster: the control-plane node is labelled kars.azure.com/pool=sandbox
+# by cmd_up_kars after creation so the kars controller's nodeSelector is satisfied.
+# A two-node topology (separate worker) was attempted but hit Docker resource limits
+# on the development machine; a single-node cluster works for local testing.
+nodes:
+  - role: control-plane

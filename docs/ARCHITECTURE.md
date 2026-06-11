@@ -2,9 +2,10 @@
 
 A per-namespace HTTP/WebSocket proxy that fronts Playwright (MCP over HTTP +
 the native Playwright WebSocket server) and routes each calling agent pod to a
-dedicated Playwright sandbox. Three backends are pluggable behind a single
+dedicated Playwright sandbox. Four backends are pluggable behind a single
 interface; agent-sandbox and OpenShell share the same SandboxClaim machinery,
-substrate uses ate.dev's Actor lifecycle and atenet-router as the data plane.
+substrate uses ate.dev's Actor lifecycle and atenet-router as the data plane,
+and KarsSandbox uses Azure's KARS controller for isolated namespace-scoped sandboxes.
 
 - [Components](#components)
 - [Identity model](#identity-model)
@@ -13,6 +14,7 @@ substrate uses ate.dev's Actor lifecycle and atenet-router as the data plane.
   - [agent-sandbox](#agent-sandbox)
   - [OpenShell](#openshell)
   - [substrate](#substrate)
+  - [KarsSandbox](#karssandbox)
 - [Bench harness and results](#bench-harness-and-results)
 
 ## Components
@@ -35,7 +37,7 @@ substrate uses ate.dev's Actor lifecycle and atenet-router as the data plane.
 |-----------------------------|---------------------------------------|----------------|
 | `proxy/internal/identify`   | client-go shared informer on labelled pods + API list fallback | `podIP → playwright-id` lookup with cache-miss fallback to a `fieldSelector=status.podIP=X` API list. Bounded polling (100ms × 100) covers the pod-IP-not-yet-populated race. |
 | `proxy/internal/session`    | Map keyed by playwright-id            | `Ensure` is singleflight per id; `Get` returns the cached endpoint or waits on the in-flight Ensure. Reaper sweeps idle sessions when both `lastActive` and `activeConns` say it's safe. |
-| `proxy/internal/backend`    | `Backend` interface (Ensure/Delete/List) | Three implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev). |
+| `proxy/internal/backend`    | `Backend` interface (Ensure/Delete/List) | Four implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev), `KarsSandbox` (Azure KARS). |
 | `proxy/cmd/playwright-proxy`| `main.go`                             | Wires it together. `/readyz` blocks until `identify.Index.Ready()` (i.e. the informer cache has synced) so kube probes don't admit traffic before pod identity is resolvable. |
 
 ## Identity model
@@ -113,6 +115,7 @@ Quick comparison:
 | agent-sandbox | `SandboxClaim` → warm pod | **No** — claim deleted ⇒ pod destroyed; next call gets a fresh pod | ~0.6s (warmpool is pre-warmed; main cost is the WS handshake) |
 | openshell     | `SandboxClaim` → warm pod (openshell image) | **No** — same as agent-sandbox | ~0.6s |
 | substrate     | `Actor` → gVisor sandbox on a worker pod | **Designed to**, via gVisor checkpoint/restore; **disabled here** (`SUBSTRATE_FORCE_BOOT=true`) because restore is broken in this environment | ~3.6s with boot-from-spec; would be sub-second with working snapshot restore |
+| karssandbox   | `KarsSandbox` CR → namespaced pod | **No** — CR deleted ⇒ namespace + pod destroyed; next call gets a fresh isolated sandbox | Variable (depends on KARS controller + image pull; typically similar to agent-sandbox) |
 
 Across all three, "sticky while alive" still holds: as long as the proxy's
 session is not reaped (idle timer + no live connections), repeat calls from
@@ -298,9 +301,117 @@ proxy's `waitUpstreamReady` runs HEAD probes against atenet (re-using the same
 Host header it will use for the real upgrade) until atenet stops returning
 503, so the client only sees latency.
 
+### KarsSandbox
+
+One `KarsSandbox` custom resource (CR) per `playwright-id`, using Azure's KARS
+(Kubernetes Azure Runtime Sandboxes) controller. The KARS controller provisions
+an isolated namespace per sandbox and creates the sandbox pod within it. The
+proxy polls `status.phase=Running`, then locates the pod IP via the CoreV1 API.
+
+**State across runs:** none. A KarsSandbox CR creates a dedicated namespace
+and pod; when the CR is deleted (idle reap, or `Delete(id)`) both the namespace
+and pod are destroyed by the KARS controller. The next caller for the same id
+gets a brand-new isolated sandbox. Like agent-sandbox and openshell, reuse only
+happens *while the sandbox is alive*.
+
+**Key differences from agent-sandbox:**
+- **Namespace isolation**: Each sandbox gets its own namespace, not just a pod
+- **No warm pool**: KARS creates pods on-demand rather than binding from a pre-warmed pool
+- **Azure integration**: Designed for Azure Kubernetes Service (AKS) with optional
+  InferencePolicy support for AI/GPU workloads
+- **BYO runtime**: Uses "Bring Your Own" runtime mode, allowing custom sandbox images
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as Client pod<br/>(playwright-id=delta)
+    participant P as playwright-proxy
+    participant K as kube-apiserver
+    participant KC as KARS controller
+    participant NS as Namespace<br/>pw-delta
+    participant SBox as Sandbox pod<br/>(in ns pw-delta)
+
+    Cl->>P: WS upgrade<br/>HTTP/1.1 GET / Upgrade: websocket
+    P->>P: identify by source IP →<br/>playwright-id=delta
+    P->>P: session cache miss →<br/>Backend.Ensure("delta")
+
+    P->>K: GET KarsSandbox pw-delta
+    K-->>P: 404 NotFound
+    P->>K: POST KarsSandbox pw-delta<br/>spec.runtime=BYO<br/>spec.image=playwright-image<br/>inferenceRef=ai-policy (optional)
+    K-->>P: 201 Created
+
+    Note over KC: KarsSandbox reconcile
+    KC->>K: create namespace pw-delta
+    K-->>KC: ok
+    KC->>K: create pod in ns pw-delta<br/>with sandbox image
+    K-->>KC: ok
+    KC->>K: KarsSandbox.status.phase=Running<br/>podName=pw-delta-xyz
+    K-->>KC: ok
+
+    loop until phase=Running
+        P->>K: GET KarsSandbox pw-delta
+        K-->>P: phase=Pending → poll
+    end
+    K-->>P: phase=Running, podName=pw-delta-xyz
+
+    P->>K: GET Pod pw-delta-xyz -n pw-delta
+    K-->>P: podIP=10.244.x.w
+
+    P-->>Cl: hijack TCP, forward upgrade
+    P->>SBox: HTTP/1.1 GET / Upgrade: websocket
+    SBox-->>P: 101 Switching Protocols
+    P-->>Cl: 101 Switching Protocols
+    Note over Cl,SBox: bidirectional bytes via hijacked TCP
+```
+
+**Configuration:**
+```bash
+BACKEND=karssandbox
+KARS_SANDBOX_IMAGE=<your-playwright-image>     # Required: sandbox container image
+KARS_INFERENCE_REF=<inference-policy-name>     # Optional: for AI/GPU workloads
+```
+
+**RBAC requirements:**
+The proxy needs additional permissions to interact with KarsSandbox CRs:
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playwright-proxy-kars
+rules:
+- apiGroups: ["kars.azure.com"]
+  resources: ["karssandboxes"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["kars.azure.com"]
+  resources: ["karssandboxes/status"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]  # To locate pod IP after KarsSandbox is Running
+```
+
+See `proxy/deploy/examples/kars/` for complete deployment manifests including
+proxy configuration, RBAC patches, and InferencePolicy examples.
+
+**Testing:**
+```bash
+# Create KARS cluster with controller
+./proxy/test/harness.sh up-kars
+
+# Run integration tests
+./proxy/test/harness.sh test kars
+
+# Run benchmarks (cold/warm/restore)
+./proxy/test/bench.sh kars
+
+# Cleanup
+./proxy/test/harness.sh down-kars
+```
+
 ## Bench harness and results
 
-`proxy/test/bench.sh` exercises three scenarios per backend:
+`proxy/test/bench.sh` exercises three scenarios per backend (note: KARS backend
+benchmarks are available but results not yet included in the table below):
 
 | Scenario   | What it measures |
 |------------|------------------|
@@ -355,14 +466,16 @@ Reading the numbers:
 ### Reproducing
 
 ```sh
-# Bring up both kind clusters (one-time per machine)
+# Bring up all kind clusters (one-time per machine)
 ./proxy/test/harness.sh up                            # 'playwright-proxy' cluster for sandboxclaim
 ( cd substrate && hack/create-kind-cluster.sh \
     && hack/install-ate-kind.sh --deploy-ate-system ) # 'kind' cluster for substrate
+./proxy/test/harness.sh up-kars                       # KARS cluster with controller
 
 # Run the full bench
 ./proxy/test/bench.sh all                             # agent-sandbox + openshell + substrate
 ./proxy/test/bench.sh substrate                       # substrate only
+./proxy/test/bench.sh kars                            # KARS only
 ```
 
 `bench.sh` does a `kubectl-ate admin debug-flush-redis` and a worker recycle

@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Test harness for playwright-proxy. Subcommands:
-#   ./harness.sh up           Create kind cluster, install agent-sandbox, build+load proxy image.
-#   ./harness.sh test BACKEND Smoke test against BACKEND with a lightweight echo upstream.
-#                             BACKEND is one of: agent-sandbox, openshell, substrate
-#   ./harness.sh e2e          Real Playwright e2e: spins up the real image, drives a browser
-#                             through the proxy with the Playwright Node SDK.
-#   ./harness.sh down         Delete kind cluster.
+#   ./harness.sh up              Create kind cluster, install agent-sandbox, build+load proxy image.
+#   ./harness.sh test BACKEND    Smoke test against BACKEND with a lightweight echo upstream.
+#                                BACKEND is one of: agent-sandbox, openshell, substrate, kars
+#   ./harness.sh e2e             Real Playwright e2e: spins up the real image, drives a browser
+#                                through the proxy with the Playwright Node SDK.
+#   ./harness.sh down            Delete kind cluster.
+#   ./harness.sh up-kars         Create kars kind cluster, build+install kars controller.
+#   ./harness.sh down-kars       Delete kars kind cluster.
 #
 # Smoke test substitutes a lightweight `traefik/whoami` container for Playwright; the
 # routing logic in the proxy is identical regardless of the upstream image. To run a
 # real Playwright e2e, apply deploy/examples/<backend>/ instead of test/echo-*.yaml.
+#
+# The kars backend test runs a full Playwright e2e (not echo/whoami) because the
+# KarsSandbox BYO spec is built around the Playwright image. It requires the kars
+# cluster to be up (./harness.sh up-kars) and the kars repo accessible at KARS_REPO.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +24,20 @@ CLUSTER="${CLUSTER:-playwright-proxy}"
 NAMESPACE="${NAMESPACE:-pw-test}"
 AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.4.6}"
 PROXY_IMAGE="${PROXY_IMAGE:-playwright-proxy:dev}"
+
+# ── kars-specific variables ────────────────────────────────────────────────────
+# KARS_REPO: path to the kars source tree. Defaults to the `kars` symlink at the
+# repo root (ln -s /path/to/azure/kars kars). Override if your layout differs.
+KARS_REPO="${KARS_REPO:-$ROOT/kars}"
+# Reuse the same kind cluster as agent-sandbox: kars installs into kars-system
+# alongside agent-sandbox, and the kars test uses a separate namespace (pw-kars).
+# This avoids spinning up a third kind node container when Docker resources are
+# already shared with the substrate cluster.
+KARS_CLUSTER="${KARS_CLUSTER:-$CLUSTER}"
+KARS_NS="${KARS_NS:-pw-kars}"
+# Use a distinct tag so this harness does not collide with kars' own e2e tags.
+KARS_CONTROLLER_IMAGE="kars-controller:e2e-pw"
+KARS_ROUTER_IMAGE="kars-inference-router:e2e-pw"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
@@ -151,8 +171,9 @@ cmd_test() {
       log "$backend smoke test PASSED"
       ;;
     substrate) cmd_test_substrate ;;
+    kars)      cmd_test_kars ;;
     *)
-      fail "usage: $0 test {agent-sandbox|openshell|substrate}"
+      fail "usage: $0 test {agent-sandbox|openshell|substrate|kars}"
       ;;
   esac
 }
@@ -253,6 +274,273 @@ cmd_e2e() {
 
   log "Playwright e2e PASSED"
 }
+
+# ── kars backend ──────────────────────────────────────────────────────────────
+
+kars_ctx() { echo "--context=kind-$KARS_CLUSTER"; }
+
+require_kars_repo() {
+  if [ ! -f "$KARS_REPO/deploy/helm/kars/Chart.yaml" ]; then
+    cat <<EOF >&2
+kars Helm chart not found at $KARS_REPO/deploy/helm/kars/Chart.yaml.
+Point KARS_REPO at the kars source tree:
+
+  export KARS_REPO=/path/to/azure/kars
+  $0 up-kars
+
+Or symlink it at the repo root:
+
+  ln -s /path/to/azure/kars kars
+EOF
+    fail "kars repo not found"
+  fi
+}
+
+build_kars_images() {
+  # ── Fast path: pre-built images ──────────────────────────────────────────
+  # If KARS_CONTROLLER_IMAGE_SRC and KARS_ROUTER_IMAGE_SRC are set, retag them
+  # into the harness tags and load into kind — no compilation required. This is
+  # the path for CI or any environment that already has Linux images available.
+  #
+  #   KARS_CONTROLLER_IMAGE_SRC=karsacr.azurecr.io/kars-controller:latest
+  #   KARS_ROUTER_IMAGE_SRC=karsacr.azurecr.io/kars-inference-router:latest
+  if [ -n "${KARS_CONTROLLER_IMAGE_SRC:-}" ] && [ -n "${KARS_ROUTER_IMAGE_SRC:-}" ]; then
+    log "retagging pre-built kars images"
+    docker tag "$KARS_CONTROLLER_IMAGE_SRC" "$KARS_CONTROLLER_IMAGE"
+    docker tag "$KARS_ROUTER_IMAGE_SRC"     "$KARS_ROUTER_IMAGE"
+    kind load docker-image "$KARS_CONTROLLER_IMAGE" --name "$KARS_CLUSTER"
+    kind load docker-image "$KARS_ROUTER_IMAGE"     --name "$KARS_CLUSTER"
+    return 0
+  fi
+
+  # ── Build path: compile + package ────────────────────────────────────────
+  # Requires Linux cross-compilation from macOS (aarch64-unknown-linux-gnu or
+  # aarch64-unknown-linux-musl target) or running on a Linux host. On macOS,
+  # `cargo build` produces Mach-O (Darwin) binaries; kind nodes run Linux ELF.
+  # If only the Darwin toolchain is available, use the pre-built image path above
+  # or run this script on a Linux host / CI runner.
+  local arch
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64)        arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) fail "unsupported arch: $arch" ;;
+  esac
+
+  if [ -x "$KARS_REPO/bin/$arch/kars-controller" ] && \
+     [ -x "$KARS_REPO/bin/$arch/kars-inference-router" ]; then
+    local fmt
+    fmt=$(file "$KARS_REPO/bin/$arch/kars-controller" 2>/dev/null || echo "unknown")
+    if echo "$fmt" | grep -q "Mach-O"; then
+      fail "kars binaries in bin/$arch/ are macOS Mach-O — cannot run in Linux containers.
+Set KARS_CONTROLLER_IMAGE_SRC + KARS_ROUTER_IMAGE_SRC to use pre-built Linux images,
+or build on a Linux host with: cd $KARS_REPO && cargo build --release"
+    fi
+    log "reusing existing kars binaries in bin/$arch/"
+  else
+    log "building kars Rust binaries (cargo build --release)"
+    (cd "$KARS_REPO" && cargo build --release --workspace \
+      --package kars-controller \
+      --package kars-inference-router)
+    mkdir -p "$KARS_REPO/bin/$arch"
+    cp "$KARS_REPO/target/release/kars-controller"       "$KARS_REPO/bin/$arch/"
+    cp "$KARS_REPO/target/release/kars-inference-router" "$KARS_REPO/bin/$arch/"
+  fi
+
+  # The kars Dockerfiles default to mcr.microsoft.com/azurelinux/distroless/base:3.0.
+  # Allow the caller to override the base image; fall back to ubuntu:20.04 which
+  # is available in the local cache when external registries are unreachable.
+  local base_override="${KARS_BASE_IMAGE:-ubuntu:20.04}"
+
+  log "building controller image $KARS_CONTROLLER_IMAGE (base: $base_override)"
+  docker build -t "$KARS_CONTROLLER_IMAGE" \
+    --platform "linux/$(go env GOARCH)" \
+    --build-arg "AZURELINUX_DISTROLESS=$base_override" \
+    --build-arg "BIN_PATH_PREFIX=bin" \
+    -f "$KARS_REPO/controller/Dockerfile" "$KARS_REPO"
+  kind load docker-image "$KARS_CONTROLLER_IMAGE" --name "$KARS_CLUSTER"
+
+  log "building inference-router image $KARS_ROUTER_IMAGE (base: $base_override)"
+  docker build -t "$KARS_ROUTER_IMAGE" \
+    --platform "linux/$(go env GOARCH)" \
+    --build-arg "AZURELINUX_DISTROLESS=$base_override" \
+    --build-arg "BIN_PATH_PREFIX=bin" \
+    -f "$KARS_REPO/inference-router/Dockerfile" "$KARS_REPO"
+  kind load docker-image "$KARS_ROUTER_IMAGE" --name "$KARS_CLUSTER"
+}
+
+install_kars_helm() {
+  log "installing kars Helm chart into kars-system"
+  # If kars-system exists but isn't owned by this Helm release (e.g. from a
+  # failed prior install), adopt it so the chart's namespace.yaml template
+  # doesn't conflict.
+  if kubectl $(kars_ctx) get ns kars-system >/dev/null 2>&1; then
+    kubectl $(kars_ctx) annotate ns kars-system \
+      meta.helm.sh/release-name=kars \
+      meta.helm.sh/release-namespace=kars-system \
+      --overwrite >/dev/null
+    kubectl $(kars_ctx) label ns kars-system \
+      app.kubernetes.io/managed-by=Helm \
+      --overwrite >/dev/null
+  fi
+  helm --kube-context "kind-$KARS_CLUSTER" upgrade --install kars "$KARS_REPO/deploy/helm/kars" \
+    --namespace kars-system \
+    --create-namespace \
+    --set controller.image.repository=kars-controller \
+    --set controller.image.tag=e2e-pw \
+    --set controller.image.pullPolicy=Never \
+    --set inferenceRouter.image.repository=kars-inference-router \
+    --set inferenceRouter.image.tag=e2e-pw \
+    --set inferenceRouter.image.pullPolicy=Never \
+    --set-string "inferenceRouter.azure.openai.endpoint=https://e2e-fake.invalid/" \
+    --set-string "foundry.endpoint=https://e2e-fake.invalid/" \
+    --set-string "foundry.projectEndpoint=https://e2e-fake.invalid/" \
+    --set "controller.replicas=1" \
+    --set "controller.extraEnv[0].name=LEADER_ELECTION_ENABLED" \
+    --set-string "controller.extraEnv[0].value=false" \
+    --wait --timeout 5m
+}
+
+cmd_up_kars() {
+  require_kars_repo
+
+  # Require the cluster to exist. The kars backend test runs inside the same
+  # kind cluster as agent-sandbox (default: $CLUSTER = playwright-proxy) to
+  # avoid spinning up a third node container when Docker resources are shared
+  # with the substrate cluster. Run `./harness.sh up` first.
+  if ! kind get clusters 2>/dev/null | grep -qx "$KARS_CLUSTER"; then
+    fail "cluster '$KARS_CLUSTER' not found — run './harness.sh up' first"
+  fi
+  log "installing kars into existing cluster '$KARS_CLUSTER'"
+
+  # Label the control-plane node so the kars controller's nodeSelector
+  # (kars.azure.com/pool=sandbox) can match it.
+  log "labelling control-plane node kars.azure.com/pool=sandbox"
+  kubectl $(kars_ctx) label node "${KARS_CLUSTER}-control-plane" \
+    kars.azure.com/pool=sandbox --overwrite
+
+  build_kars_images
+  install_kars_helm
+
+  log "building proxy image $PROXY_IMAGE"
+  (cd "$ROOT" && docker build -q -t "$PROXY_IMAGE" .)
+  kind load docker-image "$PROXY_IMAGE" --name "$KARS_CLUSTER"
+
+  log "building Playwright image $PLAYWRIGHT_IMAGE"
+  cp "$HERE/playwright-substrate-server.js" "$HERE/server.js"
+  docker build --platform "linux/$(go env GOARCH)" \
+    -t "$PLAYWRIGHT_IMAGE" \
+    -f "$HERE/playwright-substrate.Dockerfile" "$HERE" >/dev/null
+  rm -f "$HERE/server.js"
+  log "loading $PLAYWRIGHT_IMAGE into kars cluster"
+  docker save "$PLAYWRIGHT_IMAGE" \
+    | docker exec -i "$KARS_CLUSTER-control-plane" \
+        ctr --namespace=k8s.io images import --no-unpack - >/dev/null
+
+  log "creating namespace $KARS_NS"
+  kubectl $(kars_ctx) get ns "$KARS_NS" >/dev/null 2>&1 \
+    || kubectl $(kars_ctx) create ns "$KARS_NS"
+
+  log "applying proxy RBAC"
+  sed "s/NAMESPACE/$KARS_NS/g" "$ROOT/deploy/rbac.yaml" \
+    | kubectl $(kars_ctx) apply -f -
+  sed "s/NAMESPACE/$KARS_NS/g" "$ROOT/deploy/examples/kars/rbac-patch.yaml" \
+    | kubectl $(kars_ctx) apply -f -
+
+  log "applying InferencePolicy"
+  sed "s/NAMESPACE/$KARS_NS/g" "$ROOT/deploy/examples/kars/inferencepolicy.yaml" \
+    | kubectl $(kars_ctx) apply -f -
+
+  log "applying playwright scripts ConfigMap"
+  sed "s/NAMESPACE/$KARS_NS/g" "$HERE/playwright-scripts.yaml" \
+    | kubectl $(kars_ctx) apply -f -
+
+  log "deploying in-cluster fetch target (traefik/whoami)"
+  sed "s/NAMESPACE/$KARS_NS/g" "$HERE/test-target.yaml" \
+    | kubectl $(kars_ctx) apply -f -
+  kubectl $(kars_ctx) -n "$KARS_NS" rollout status deploy/test-target --timeout=60s
+}
+
+cmd_test_kars() {
+  local ctx ns
+  ctx=$(kars_ctx)
+  ns="$KARS_NS"
+
+  log "kars backend e2e: deploying proxy"
+  sed -e "s|namespace: NAMESPACE|namespace: $ns|g" \
+      -e "s|PROXY_IMAGE|$PROXY_IMAGE|g" \
+      -e "s|PLAYWRIGHT_IMAGE|$PLAYWRIGHT_IMAGE|g" \
+      "$HERE/proxy-kars.yaml" | kubectl $ctx apply -f -
+  kubectl $ctx -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl $ctx -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s
+
+  # The kars proxy ENSURE_TIMEOUT is 180s (no warmpool; full Chromium cold
+  # start). Use a generous job deadline so the first sandbox creation doesn't
+  # race the job timeout.
+  local deadline=300
+
+  for id in alpha beta; do
+    kubectl $ctx -n "$ns" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
+    sed -e "s/NAMESPACE/$ns/g" -e "s/CLIENTID/$id/g" \
+      "$HERE/playwright-client-job.yaml" | kubectl $ctx apply -f -
+  done
+
+  log "waiting for playwright client Jobs (alpha + beta)"
+  for id in alpha beta; do
+    local end=$(($(date +%s) + deadline))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if kubectl $ctx -n "$ns" get job "playwright-e2e-$id" \
+           -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null \
+           | grep -q True; then
+        break
+      fi
+      if kubectl $ctx -n "$ns" get job "playwright-e2e-$id" \
+           -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null \
+           | grep -q True; then
+        log "kars: job playwright-e2e-$id failed — proxy + controller logs:"
+        kubectl $ctx -n "$ns" logs deploy/playwright-proxy --tail=40 || true
+        kubectl $ctx -n kars-system logs \
+          -l app.kubernetes.io/component=controller --tail=40 || true
+        fail "playwright-e2e-$id failed"
+      fi
+      sleep 2
+    done
+    [ "$(date +%s)" -lt "$end" ] || fail "playwright-e2e-$id timed out after ${deadline}s"
+  done
+
+  log "client logs:"
+  kubectl $ctx -n "$ns" logs job/playwright-e2e-alpha | sed 's/^/    [alpha] /'
+  kubectl $ctx -n "$ns" logs job/playwright-e2e-beta  | sed 's/^/    [beta]  /'
+
+  # Assert that KarsSandbox CRs exist.
+  for id in alpha beta; do
+    kubectl $ctx -n "$ns" get karssandbox "pw-$id" >/dev/null \
+      || fail "expected KarsSandbox pw-$id to exist in $ns"
+    log "KarsSandbox pw-$id ✓"
+  done
+
+  # Assert distinct sandbox namespaces.
+  local ns_a ns_b
+  ns_a=$(kubectl $ctx -n "$ns" get karssandbox pw-alpha \
+    -o jsonpath='{.status.namespace}' 2>/dev/null || true)
+  ns_b=$(kubectl $ctx -n "$ns" get karssandbox pw-beta \
+    -o jsonpath='{.status.namespace}' 2>/dev/null || true)
+  [ -n "$ns_a" ] && [ -n "$ns_b" ] || fail "KarsSandbox status.namespace not populated"
+  [ "$ns_a" != "$ns_b" ]           || fail "alpha and beta share namespace: $ns_a"
+  log "pw-alpha → $ns_a ; pw-beta → $ns_b  (distinct ✓)"
+
+  log "kars e2e PASSED"
+}
+
+cmd_down_kars() {
+  # kars installs into the shared cluster ($KARS_CLUSTER = $CLUSTER by default);
+  # we only uninstall kars, not delete the cluster.
+  log "uninstalling kars from cluster '$KARS_CLUSTER'"
+  helm --kube-context "kind-$KARS_CLUSTER" uninstall kars --namespace kars-system 2>/dev/null || true
+  kubectl $(kars_ctx) delete ns "$KARS_NS" --ignore-not-found >/dev/null || true
+}
+
+# ── substrate backend ──────────────────────────────────────────────────────────
 
 SUBSTRATE_REPO="${SUBSTRATE_REPO:-$ROOT/../substrate}"
 SUBSTRATE_CLUSTER="${SUBSTRATE_CLUSTER:-kind}"          # substrate's default
@@ -410,12 +698,14 @@ cmd_down() {
 }
 
 case "${1:-}" in
-  up)   shift; cmd_up   "$@" ;;
-  test) shift; cmd_test "$@" ;;
-  e2e)  shift; cmd_e2e  "$@" ;;
-  down) shift; cmd_down "$@" ;;
+  up)        shift; cmd_up        "$@" ;;
+  test)      shift; cmd_test      "$@" ;;
+  e2e)       shift; cmd_e2e       "$@" ;;
+  down)      shift; cmd_down      "$@" ;;
+  up-kars)   shift; cmd_up_kars   "$@" ;;
+  down-kars) shift; cmd_down_kars "$@" ;;
   ""|-h|--help)
-    sed -n '2,11p' "$0"
+    sed -n '2,16p' "$0"
     ;;
   *) fail "unknown subcommand: $1" ;;
 esac

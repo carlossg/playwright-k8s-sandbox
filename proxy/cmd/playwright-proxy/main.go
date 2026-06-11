@@ -66,6 +66,8 @@ func run(log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+	case "karssandbox":
+		bk = backend.NewKarsSandbox(dyn, clientset, cfg.Namespace, cfg.KarsInferenceRef, cfg.KarsSandboxImage, cfg.SandboxPort)
 	default:
 		return fmt.Errorf("unknown backend %q", cfg.Backend)
 	}

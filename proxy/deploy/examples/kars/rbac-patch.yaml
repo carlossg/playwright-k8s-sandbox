@@ -1,0 +1,33 @@
+# Additional RBAC rules for the karssandbox backend.
+# Patch these into the ClusterRole defined in proxy/deploy/rbac.yaml, or
+# create a separate Role if the proxy is namespace-scoped.
+#
+# Two permissions beyond the base rbac.yaml:
+#   1. KarsSandbox CRDs in the proxy namespace (create/get/list/delete).
+#   2. Pod reads in kars-* namespaces to resolve the sandbox pod IP after
+#      the KarsSandbox reaches phase=Running.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playwright-proxy-kars
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: playwright-proxy-kars
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: playwright-proxy-kars
+subjects:
+  - kind: ServiceAccount
+    name: playwright-proxy
+    namespace: NAMESPACE

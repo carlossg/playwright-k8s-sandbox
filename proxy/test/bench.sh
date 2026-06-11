@@ -4,25 +4,29 @@
 # Scenarios:
 #   cold     — no Playwright runtime exists for the playwright-id; first request
 #              has to provision it (sandboxclaim → claim+sandbox, substrate →
-#              CreateActor + restore-from-golden)
+#              CreateActor + restore-from-golden, kars → KarsSandbox CR create +
+#              controller reconcile + pod schedule + Chromium start)
 #   warm     — runtime already exists for the id; just connect+fetch
 #   restore  — for substrate only as a *distinct* path: the actor was previously
 #              running and then suspended; ResumeActor restores from the
-#              per-actor snapshot (not the golden one). agent-sandbox and
-#              openshell don't have a hibernate model, so 'restore' there is
-#              the same code path as 'cold' (sandbox is destroyed and recreated).
+#              per-actor snapshot (not the golden one). agent-sandbox, openshell,
+#              and kars don't have a hibernate model, so 'restore' there is the
+#              same code path as 'cold' (sandbox is destroyed and recreated).
 #
 # Per-backend usage:
 #   ./bench.sh agent-sandbox
 #   ./bench.sh openshell
 #   ./bench.sh substrate
-#   ./bench.sh all                  # runs all three, prints a combined markdown table
+#   ./bench.sh kars
+#   ./bench.sh all                  # runs all four, prints a combined markdown table
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 SLIM_IMAGE_TAG="localhost:5001/playwright-substrate:slim-1.49.1"
+KARS_CLUSTER="${KARS_CLUSTER:-kars-playwright}"
+KARS_NS="${KARS_NS:-pw-kars}"
 RESULTS_FILE="${RESULTS_FILE:-/tmp/bench-results.csv}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -367,6 +371,101 @@ bench_substrate() {
   fi
 }
 
+# -------------------------------- kars --------------------------------------
+
+# Delete the KarsSandbox CR and wait for the controller to finish tearing down
+# the sandbox namespace, then restart the proxy so its in-memory session map is
+# cleared before the next cold scenario.
+wipe_karssandbox() {
+  local ns=$1 ctx=$2 id=$3
+  local cr="pw-$id"
+  local sandbox_ns="kars-$cr"
+
+  kubectl --context "$ctx" -n "$ns" delete karssandbox "$cr" --ignore-not-found >/dev/null 2>&1 || true
+
+  # Wait for the controller's finalizer to delete the sandbox namespace (up to 60s).
+  local end=$(($(date +%s) + 60))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    if ! kubectl --context "$ctx" get namespace "$sandbox_ns" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+
+  # Clear proxy session cache.
+  kubectl --context "$ctx" -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl --context "$ctx" -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s >/dev/null
+  wait_for_proxy_ready "$ns" "$ctx"
+}
+
+bench_kars() {
+  local ctx="--context=kind-$KARS_CLUSTER"
+  local ns="$KARS_NS"
+  local id="bench-kars"
+
+  log "[kars] preparing (cluster=$KARS_CLUSTER, ns=$ns)"
+
+  # The kars cluster must already be up (harness.sh up-kars). Verify it.
+  if ! kubectl $ctx get ns kars-system >/dev/null 2>&1; then
+    warn "[kars] kars-system namespace not found in cluster '$KARS_CLUSTER'"
+    warn "       Run: ./harness.sh up-kars"
+    record kars cold  FAIL "{}"
+    record kars warm  FAIL "{}"
+    record kars restore FAIL "{}"
+    return 1
+  fi
+
+  ensure_image_in_cluster "$KARS_CLUSTER"
+  ensure_bench_deps "$ns" "$ctx"
+  ensure_labelled_probe_pod "$ns" "$ctx"
+
+  log "[kars] deploying proxy (BACKEND=karssandbox, SANDBOX_PORT=9222)"
+  sed -e "s|namespace: NAMESPACE|namespace: $ns|g" \
+      -e "s|PROXY_IMAGE|playwright-proxy:dev|g" \
+      -e "s|PLAYWRIGHT_IMAGE|$SLIM_IMAGE_TAG|g" \
+      "$HERE/proxy-kars.yaml" | kubectl $ctx apply -f - >/dev/null
+  kubectl $ctx -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl $ctx -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s >/dev/null
+
+  # kars cold starts are slow (no warmpool; namespace + pod + Chromium). Give
+  # the bench client 300s — well above the 180s ENSURE_TIMEOUT on the proxy.
+  local cold_deadline=300
+
+  # Use the FQDN for the target: the sandbox pod runs in kars-{id} namespace,
+  # so a bare "test-target" hostname would not resolve there.
+  local target_url="http://test-target.${ns}.svc.cluster.local/"
+
+  # cold
+  log "[kars cold] wiping prior sandbox"
+  wipe_karssandbox "$ns" "$ctx" "$id"
+  log "[kars cold] running client"
+  if out=$(run_client kars cold "$ns" "$ctx" "$id" "$target_url" "$cold_deadline"); then
+    record kars cold PASS "${out#BENCH }"
+    log "[kars cold] $out"
+  else
+    record kars cold FAIL "{}"
+  fi
+
+  # warm — reuse the running sandbox
+  log "[kars warm] running client (same id, sandbox already running)"
+  if out=$(run_client kars warm "$ns" "$ctx" "$id" "$target_url" 60); then
+    record kars warm PASS "${out#BENCH }"
+    log "[kars warm] $out"
+  else
+    record kars warm FAIL "{}"
+  fi
+
+  # restore — same code path as cold for kars (no snapshot/hibernate)
+  log "[kars restore] wiping (same as cold — kars has no snapshot)"
+  wipe_karssandbox "$ns" "$ctx" "$id"
+  if out=$(run_client kars restore "$ns" "$ctx" "$id" "$target_url" "$cold_deadline"); then
+    record kars restore PASS "${out#BENCH }"
+    log "[kars restore] $out"
+  else
+    record kars restore FAIL "{}"
+  fi
+}
+
 # ----------------------------- main ----------------------------------------
 
 print_table() {
@@ -392,12 +491,14 @@ main() {
     agent-sandbox) bench_sandboxclaim agent-sandbox pw-test kind-playwright-proxy playwright-proxy ;;
     openshell)     bench_sandboxclaim openshell     pw-test kind-playwright-proxy playwright-proxy ;;
     substrate)     bench_substrate ;;
+    kars)          bench_kars ;;
     all)
       bench_sandboxclaim agent-sandbox pw-test kind-playwright-proxy playwright-proxy
       bench_sandboxclaim openshell     pw-test kind-playwright-proxy playwright-proxy
       bench_substrate
+      bench_kars
       ;;
-    *) fail "usage: $0 {agent-sandbox|openshell|substrate|all}" ;;
+    *) fail "usage: $0 {agent-sandbox|openshell|substrate|kars|all}" ;;
   esac
   print_table
 }

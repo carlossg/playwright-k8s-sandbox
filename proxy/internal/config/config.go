@@ -55,6 +55,15 @@ type Config struct {
 	// leaves the app sub-container in `stopped` state).
 	SubstrateForceBoot bool
 
+	// KarsInferenceRef is the name of the InferencePolicy CR in the proxy
+	// namespace that each Playwright KarsSandbox references. Required for
+	// the karssandbox backend.
+	KarsInferenceRef string
+
+	// KarsSandboxImage is the Playwright container image used when creating
+	// KarsSandbox CRs. Required for the karssandbox backend.
+	KarsSandboxImage string
+
 	// IdleTTL is how long a session must be idle (no traffic AND no open connections) before reaping.
 	IdleTTL time.Duration
 
@@ -78,6 +87,8 @@ func FromEnv() (*Config, error) {
 		SubstrateRouterAddr:    envOr("SUBSTRATE_ROUTER_ADDR", "atenet-router.ate-system.svc.cluster.local:80"),
 		SubstrateActorTemplate: os.Getenv("SUBSTRATE_ACTOR_TEMPLATE"),
 		SubstrateForceBoot:     envOr("SUBSTRATE_FORCE_BOOT", "") == "true",
+		KarsInferenceRef:       os.Getenv("KARS_INFERENCE_REF"),
+		KarsSandboxImage:       os.Getenv("KARS_SANDBOX_IMAGE"),
 	}
 
 	port, err := strconv.Atoi(envOr("SANDBOX_PORT", "9222"))
@@ -117,8 +128,15 @@ func FromEnv() (*Config, error) {
 		if !strings.Contains(c.SubstrateActorTemplate, "/") {
 			return nil, fmt.Errorf("SUBSTRATE_ACTOR_TEMPLATE must be 'namespace/name', got %q", c.SubstrateActorTemplate)
 		}
+	case "karssandbox":
+		if c.KarsInferenceRef == "" {
+			return nil, fmt.Errorf("KARS_INFERENCE_REF is required for karssandbox backend")
+		}
+		if c.KarsSandboxImage == "" {
+			return nil, fmt.Errorf("KARS_SANDBOX_IMAGE is required for karssandbox backend")
+		}
 	default:
-		return nil, fmt.Errorf("unknown BACKEND %q (want sandboxclaim or substrate)", c.Backend)
+		return nil, fmt.Errorf("unknown BACKEND %q (want sandboxclaim, substrate, or karssandbox)", c.Backend)
 	}
 	return c, nil
 }

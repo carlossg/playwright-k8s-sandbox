@@ -1,0 +1,20 @@
+# Minimal InferencePolicy required by the KarsSandbox schema.
+# Playwright sandboxes don't use the inference router for model calls, but
+# the kars controller requires an inferenceRef on every KarsSandbox CR.
+#
+# Apply this once per namespace before starting the playwright-proxy.
+# Configure the proxy with:
+#   BACKEND=karssandbox
+#   KARS_INFERENCE_REF=playwright
+#   KARS_SANDBOX_IMAGE=<your-registry>/playwright:<tag>
+#   SANDBOX_PORT=9222  (default)
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: playwright
+  namespace: NAMESPACE
+spec:
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
