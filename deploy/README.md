@@ -6,7 +6,7 @@ This directory contains Kubernetes manifests for deploying the Playwright proxy.
 
 - Kubernetes cluster (1.24+)
 - `kubectl` configured with cluster access
-- Docker Hub credentials (for CI/CD)
+- GitHub Container Registry access (for CI/CD)
 
 ## Quick Start
 
@@ -99,21 +99,18 @@ The deployment includes several security best practices:
 
 ### GitHub Actions
 
-The repository includes a GitHub Actions workflow that automatically builds and pushes images to Docker Hub.
+The repository includes a GitHub Actions workflow that automatically builds and pushes images to GitHub Container Registry (ghcr.io).
 
 #### Required Secrets
 
-Add these secrets to your GitHub repository (Settings → Secrets and variables → Actions):
+**No additional secrets required!** The workflow uses `GITHUB_TOKEN` which is automatically available with permissions to push to GitHub Container Registry.
 
-1. `DOCKERHUB_USERNAME`: Your Docker Hub username
-2. `DOCKERHUB_TOKEN`: Docker Hub access token (not password)
+#### First-time Setup
 
-To create a Docker Hub access token:
-1. Log in to [Docker Hub](https://hub.docker.com/)
-2. Go to Account Settings → Security → Access Tokens
-3. Click "New Access Token"
-4. Give it a name (e.g., "GitHub Actions")
-5. Copy the token and save it as `DOCKERHUB_TOKEN` secret
+After your first successful build, make the package public (optional):
+1. Go to: `https://github.com/users/YOUR_USERNAME/packages/container/playwright-k8s-sandbox`
+2. Click "Package settings"
+3. Scroll to "Danger Zone" → "Change visibility" → "Public"
 
 #### Trigger Conditions
 
@@ -136,8 +133,14 @@ Images are tagged as:
 To build and push manually:
 
 ```bash
-docker build -t csanchez/playwright-k8s-sandbox:latest .
-docker push csanchez/playwright-k8s-sandbox:latest
+# Build the image
+docker build -t ghcr.io/carlossg/playwright-k8s-sandbox:latest .
+
+# Log in to GitHub Container Registry
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+
+# Push the image
+docker push ghcr.io/carlossg/playwright-k8s-sandbox:latest
 ```
 
 ## Monitoring

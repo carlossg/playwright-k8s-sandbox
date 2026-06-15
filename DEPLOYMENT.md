@@ -5,24 +5,22 @@ This repository includes production-ready deployment configurations for the Play
 ## Quick Links
 
 - **Deployment Documentation**: [deploy/README.md](deploy/README.md)
-- **Docker Image**: `docker.io/csanchez/playwright-k8s-sandbox`
+- **Docker Image**: `ghcr.io/carlossg/playwright-k8s-sandbox`
 - **CI/CD Workflow**: [.github/workflows/docker-build.yml](.github/workflows/docker-build.yml)
 
 ## Setup GitHub Actions
 
-Before the automated builds work, add these secrets to your GitHub repository:
+The workflow uses `GITHUB_TOKEN` which is automatically available in GitHub Actions with permissions to push to GitHub Container Registry (ghcr.io).
 
-1. Go to: `Settings` → `Secrets and variables` → `Actions` → `New repository secret`
+**No additional secrets are required** - the workflow will automatically:
+- Authenticate using `${{ secrets.GITHUB_TOKEN }}`
+- Push to `ghcr.io/${{ github.repository }}`
+- Support multi-arch builds (amd64/arm64)
 
-2. Add two secrets:
-   - **Name**: `DOCKERHUB_USERNAME`  
-     **Value**: Your Docker Hub username (e.g., `csanchez`)
-   
-   - **Name**: `DOCKERHUB_TOKEN`  
-     **Value**: Your Docker Hub access token
-     - Create at: https://hub.docker.com/settings/security
-     - Select: "New Access Token"
-     - Permissions: "Read, Write, Delete"
+**First-time setup**: After your first successful build, make the package public:
+1. Go to: `https://github.com/users/YOUR_USERNAME/packages/container/playwright-k8s-sandbox`
+2. Click "Package settings"
+3. Scroll to "Danger Zone" → "Change visibility" → "Public"
 
 ## Deploy to Kubernetes
 
@@ -48,13 +46,13 @@ kubectl -n $NAMESPACE logs -l app.kubernetes.io/name=playwright-proxy
 │         GitHub Actions (CI/CD)          │
 │  - Build on push to main                │
 │  - Multi-arch (amd64/arm64)            │
-│  - Push to Docker Hub                   │
+│  - Push to GitHub Container Registry    │
 └─────────────────┬───────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────┐
-│         Docker Hub Registry             │
-│  csanchez/playwright-k8s-sandbox       │
+│   GitHub Container Registry (ghcr.io)   │
+│  carlossg/playwright-k8s-sandbox       │
 │  - latest, main-<sha>, v*.*.* tags     │
 └─────────────────┬───────────────────────┘
                   │
@@ -135,9 +133,9 @@ Check GitHub Actions:
 - Review build logs
 
 Common issues:
-- Missing Docker Hub credentials
-- Incorrect secret names
+- Insufficient permissions on `GITHUB_TOKEN` (check workflow permissions)
 - Network issues during build
+- Package visibility settings (first push creates a private package by default)
 
 ### Deployment Issues
 
@@ -170,8 +168,8 @@ kubectl -n $NAMESPACE get pods --show-labels
 
 ## Production Checklist
 
-- [ ] GitHub secrets configured (DOCKERHUB_USERNAME, DOCKERHUB_TOKEN)
-- [ ] First successful build and push to Docker Hub
+- [ ] First successful build and push to GitHub Container Registry
+- [ ] Package visibility set to public (if needed for cluster access)
 - [ ] Image pulled successfully in cluster
 - [ ] RBAC applied and verified
 - [ ] Deployment running with proper security contexts

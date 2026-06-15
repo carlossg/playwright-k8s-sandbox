@@ -39,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          image: docker.io/csanchez/playwright-k8s-sandbox:latest
+          image: ghcr.io/carlossg/playwright-k8s-sandbox:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: data
