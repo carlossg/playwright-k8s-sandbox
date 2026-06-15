@@ -98,7 +98,7 @@ keeps the sandbox alive.
 
 ## Backends
 
-All three implement the same interface:
+All four implement the same interface:
 
 ```go
 type Backend interface {
@@ -117,7 +117,7 @@ Quick comparison:
 | substrate     | `Actor` → gVisor sandbox on a worker pod | **Designed to**, via gVisor checkpoint/restore; **disabled here** (`SUBSTRATE_FORCE_BOOT=true`) because restore is broken in this environment | ~3.6s with boot-from-spec; would be sub-second with working snapshot restore |
 | karssandbox   | `KarsSandbox` CR → namespaced pod | **No** — CR deleted ⇒ namespace + pod destroyed; next call gets a fresh isolated sandbox | Variable (depends on KARS controller + image pull; typically similar to agent-sandbox) |
 
-Across all three, "sticky while alive" still holds: as long as the proxy's
+Across all four, "sticky while alive" still holds: as long as the proxy's
 session is not reaped (idle timer + no live connections), repeat calls from
 the same id always hit the same sandbox. The difference is whether state
 *survives* a reap/restart.
@@ -352,23 +352,32 @@ sequenceDiagram
         P->>K: GET KarsSandbox pw-delta
         K-->>P: phase=Pending → poll
     end
-    K-->>P: phase=Running, podName=pw-delta-xyz
+    K-->>P: phase=Running, namespace=pw-delta
 
-    P->>K: GET Pod pw-delta-xyz -n pw-delta
-    K-->>P: podIP=10.244.x.w
+    P->>K: GET Pod -n pw-delta -l kars.azure.com/component=sandbox
+    K-->>P: podIP=10.244.x.w (confirm ready)
 
+    Note over P: Use Service DNS for cross-namespace access:<br/>pw-delta.pw-delta.svc.cluster.local:9222
     P-->>Cl: hijack TCP, forward upgrade
-    P->>SBox: HTTP/1.1 GET / Upgrade: websocket
+    P->>SBox: HTTP/1.1 GET / Upgrade: websocket<br/>via Service DNS
     SBox-->>P: 101 Switching Protocols
     P-->>Cl: 101 Switching Protocols
     Note over Cl,SBox: bidirectional bytes via hijacked TCP
 ```
+
+**Network isolation:**
+KARS sandboxes run in isolated namespaces with NetworkPolicies that block
+cross-namespace pod-to-pod traffic. The proxy uses Service DNS names
+(`<sandbox-name>.<sandbox-namespace>.svc.cluster.local`) instead of pod IPs
+to route traffic. Currently, KARS Services only expose port 8443 (inference-router);
+additional configuration may be needed to expose custom application ports.
 
 **Configuration:**
 ```bash
 BACKEND=karssandbox
 KARS_SANDBOX_IMAGE=<your-playwright-image>     # Required: sandbox container image
 KARS_INFERENCE_REF=<inference-policy-name>     # Optional: for AI/GPU workloads
+SANDBOX_PORT=9222                              # Default: application listen port
 ```
 
 **RBAC requirements:**

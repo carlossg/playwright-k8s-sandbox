@@ -36,6 +36,7 @@ When the agent pod is rescheduled the new pod has the same label, so the same
 |------------------|-----------------------------------------------------------|-----------------------------------------------------------------------|
 | `sandboxclaim`   | One `SandboxClaim` (CRD `agents.x-k8s.io/v1beta1`) per id, claiming from `WARMPOOL_NAME` | Used for both **agent-sandbox** and **OpenShell** — point the warmpool at the OpenShell template for the latter. |
 | `substrate`      | One `Actor` (CRD `ate.dev/v1alpha1`) per id                | Routes through the substrate router; `X-Substrate-Actor` header selects the actor. |
+| `karssandbox`    | One `KarsSandbox` (CRD `kars.azure.com/v1alpha1`) per id  | Azure KARS controller with namespace isolation. Uses Service DNS for cross-namespace access. |
 
 A warm pool is required for the `sandboxclaim` backend.
 
@@ -49,13 +50,15 @@ All via env vars on the Deployment:
 | `LISTEN_ADDR`             | `:9000`            |                                | Dataplane bind addr |
 | `METRICS_ADDR`            | `:9090`            |                                | `/healthz` and `/readyz` |
 | `PLAYWRIGHT_LABEL_KEY`    | `playwright-id`    |                                | Pod label key |
-| `BACKEND`                 | `sandboxclaim`     |                                | `sandboxclaim` or `substrate` |
+| `BACKEND`                 | `sandboxclaim`     |                                | `sandboxclaim`, `substrate`, or `karssandbox` |
 | `WARMPOOL_NAME`           | —                  | `sandboxclaim`                 | `SandboxWarmPool` name |
 | `SANDBOX_TEMPLATE_NAME`   | `$WARMPOOL_NAME`   |                                | `SandboxTemplate` name referenced by the `SandboxClaim` |
 | `SANDBOX_PORT`            | `9222`             |                                | Port on the sandbox pod (sandboxclaim) or actor container (substrate) |
 | `SUBSTRATE_API_ENDPOINT`  | `api.ate-system.svc.cluster.local:443` | `substrate`        | gRPC endpoint of `ate-api-server` |
 | `SUBSTRATE_ROUTER_ADDR`   | `atenet-router.ate-system.svc.cluster.local:80` | `substrate` | `host:port` of `atenet-router` |
 | `SUBSTRATE_ACTOR_TEMPLATE`| —                  | `substrate`                    | `namespace/name` of an `ActorTemplate` |
+| `KARS_SANDBOX_IMAGE`      | —                  | `karssandbox`                  | Container image for KARS sandbox |
+| `KARS_INFERENCE_REF`      | —                  |                                | Optional InferencePolicy name for KARS |
 | `IDLE_TTL`                | `10m`              |                                | Reap after this idle period |
 | `IDLE_CHECK_INTERVAL`     | `30s`              |                                | Reaper scan cadence |
 | `ENSURE_TIMEOUT`          | `30s`              |                                | Max wait for sandbox ready |
@@ -66,7 +69,7 @@ silent WebSockets keep the sandbox alive.
 
 ## Deploy
 
-Per-backend example manifests live under `deploy/examples/{agent-sandbox,openshell,substrate}/`.
+Per-backend example manifests live under `deploy/examples/{agent-sandbox,openshell,substrate,kars}/`.
 For agent-sandbox or OpenShell:
 
 ```sh
@@ -90,6 +93,9 @@ sed "s/NAMESPACE/agents/g" deploy/proxy.yaml | kubectl apply -f -
 For substrate, the install path differs because substrate ships its own ate.dev
 control plane, gVisor runsc, and snapshot bucket. See
 `deploy/examples/substrate/` and the substrate repo's `hack/install-ate-kind.sh`.
+
+For KARS, you need the KARS controller installed. See `deploy/examples/kars/` for
+configuration examples and `test/harness.sh up-kars` for a local test setup.
 
 The proxy uses the `extensions.agents.x-k8s.io/v1alpha1` CRDs that the v0.4.x
 agent-sandbox releases ship; the in-source v1beta1 schema is compatible but not
