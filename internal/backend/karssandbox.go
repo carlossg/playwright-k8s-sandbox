@@ -84,13 +84,17 @@ func (k *KarsSandboxBackend) Ensure(ctx context.Context, playwrightID string) (E
 		return Endpoint{}, err
 	}
 
-	// Phase 2: find a running pod in the dedicated sandbox namespace.
-	ip, err := k.waitForPodIP(ctx, sandboxNs)
+	// Phase 2: wait for pod to be ready (confirms sandbox is up).
+	// Use Service DNS name instead of pod IP because KARS sandboxes run in
+	// isolated namespaces with NetworkPolicies that block direct pod access.
+	_, err = k.waitForPodIP(ctx, sandboxNs)
 	if err != nil {
 		return Endpoint{}, err
 	}
 
-	return Endpoint{Host: ip, Port: k.port}, nil
+	// Return Service DNS name: <sandbox-name>.<sandbox-namespace>.svc.cluster.local
+	serviceFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", name, sandboxNs)
+	return Endpoint{Host: serviceFQDN, Port: k.port}, nil
 }
 
 // waitForRunning polls the KarsSandbox CR until status.phase is "Running"
@@ -198,7 +202,7 @@ func (k *KarsSandboxBackend) buildCR(name, playwrightID string) *unstructured.Un
 				"byo": map[string]any{
 					"image":            k.image,
 					"command":          []any{"node", "/server.js"},
-					"contract_version": "v1",
+					"contractVersion": "v1",
 					"env": []any{
 						map[string]any{"name": "PORT", "value": fmt.Sprintf("%d", k.port)},
 						map[string]any{"name": "NODE_PATH", "value": "/usr/local/lib/node_modules"},
