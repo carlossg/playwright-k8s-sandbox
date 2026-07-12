@@ -2,20 +2,24 @@
 # Test harness for playwright-proxy. Subcommands:
 #   ./harness.sh up              Create kind cluster, install agent-sandbox, build+load proxy image.
 #   ./harness.sh test BACKEND    Smoke test against BACKEND with a lightweight echo upstream.
-#                                BACKEND is one of: agent-sandbox, openshell, substrate, kars
+#                                BACKEND is one of: agent-sandbox, openshell, substrate, kars, isola
 #   ./harness.sh e2e             Real Playwright e2e: spins up the real image, drives a browser
 #                                through the proxy with the Playwright Node SDK.
 #   ./harness.sh down            Delete kind cluster.
 #   ./harness.sh up-kars         Create kars kind cluster, build+install kars controller.
 #   ./harness.sh down-kars       Delete kars kind cluster.
+#   ./harness.sh up-isola        Install isola (operator + CRDs) into the existing cluster.
+#   ./harness.sh down-isola      Uninstall isola from the cluster.
 #
 # Smoke test substitutes a lightweight `traefik/whoami` container for Playwright; the
 # routing logic in the proxy is identical regardless of the upstream image. To run a
 # real Playwright e2e, apply deploy/examples/<backend>/ instead of test/echo-*.yaml.
 #
-# The kars backend test runs a full Playwright e2e (not echo/whoami) because the
-# KarsSandbox BYO spec is built around the Playwright image. It requires the kars
-# cluster to be up (./harness.sh up-kars) and the kars repo accessible at KARS_REPO.
+# The kars and isola backend tests run a full Playwright e2e (not echo/whoami) because
+# their sandbox specs are built around the Playwright image. kars requires the kars
+# cluster to be up (./harness.sh up-kars) and the kars repo accessible at KARS_REPO;
+# isola requires ./harness.sh up-isola and a gVisor RuntimeClass on cluster nodes (see
+# the up-isola KNOWN LIMITATION note below re: gVisor-in-kind).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +42,20 @@ KARS_NS="${KARS_NS:-pw-kars}"
 # Use a distinct tag so this harness does not collide with kars' own e2e tags.
 KARS_CONTROLLER_IMAGE="kars-controller:e2e-pw"
 KARS_ROUTER_IMAGE="kars-inference-router:e2e-pw"
+
+# ── isola-specific variables ───────────────────────────────────────────────────
+# isola ships a published OCI Helm chart, so (unlike kars) there is no local
+# build step — just `helm install` from ghcr.io.
+# Reuse the same kind cluster as agent-sandbox/kars, same rationale as KARS_CLUSTER.
+ISOLA_CLUSTER="${ISOLA_CLUSTER:-$CLUSTER}"
+ISOLA_CHART="${ISOLA_CHART:-oci://ghcr.io/isola-run/charts/isola}"
+# Namespace isola's control plane (operator + api-gateway) installs into.
+ISOLA_SYSTEM_NS="${ISOLA_SYSTEM_NS:-isola-system}"
+# Single shared namespace where every Sandbox CR (and its pod) lives, regardless
+# of playwright-id — must match Config.IsolaNamespace / ISOLA_NAMESPACE.
+ISOLA_SANDBOX_NS="${ISOLA_SANDBOX_NS:-isola-sandboxes}"
+# The proxy's own namespace for this backend's test, distinct from ISOLA_SANDBOX_NS.
+ISOLA_NS="${ISOLA_NS:-pw-isola}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
@@ -172,8 +190,9 @@ cmd_test() {
       ;;
     substrate) cmd_test_substrate ;;
     kars)      cmd_test_kars ;;
+    isola)     cmd_test_isola ;;
     *)
-      fail "usage: $0 test {agent-sandbox|openshell|substrate|kars}"
+      fail "usage: $0 test {agent-sandbox|openshell|substrate|kars|isola}"
       ;;
   esac
 }
@@ -540,6 +559,169 @@ cmd_down_kars() {
   kubectl $(kars_ctx) delete ns "$KARS_NS" --ignore-not-found >/dev/null || true
 }
 
+# ── isola backend ──────────────────────────────────────────────────────────────
+
+isola_ctx() { echo "--context=kind-$ISOLA_CLUSTER"; }
+
+cmd_up_isola() {
+  # Require the cluster to exist. isola reuses the same kind cluster as
+  # agent-sandbox/kars, same rationale as cmd_up_kars.
+  if ! kind get clusters 2>/dev/null | grep -qx "$ISOLA_CLUSTER"; then
+    fail "cluster '$ISOLA_CLUSTER' not found — run './harness.sh up' first"
+  fi
+  log "installing isola into existing cluster '$ISOLA_CLUSTER'"
+
+  # KNOWN LIMITATION: isola requires a gVisor (runsc) RuntimeClass on cluster
+  # nodes for real sandbox isolation. Stock kind nodes don't ship containerd
+  # configured for runsc (see isola's hack/setup.sh for the full node config),
+  # which is out of scope for this harness. We still install the RuntimeClass
+  # object so Sandbox CRs don't fail admission, but without a working runsc
+  # shim, sandbox pods will fail to start — the same failure mode kars hits
+  # without its controller installed. Treat `up-isola` as sufficient for
+  # exercising the proxy's Ensure/Delete/List wiring against the Sandbox CR
+  # API, not as a full isolation smoke test, until a gVisor-capable node is
+  # available (e.g. a real cluster with gVisor installed per isola's README).
+  log "installing gVisor RuntimeClass (isolation itself requires runsc on nodes; see comment above)"
+  cat <<'EOF' | kubectl $(isola_ctx) apply -f -
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+
+  log "installing isola Helm chart into $ISOLA_SYSTEM_NS (sandbox namespace: $ISOLA_SANDBOX_NS)"
+  helm --kube-context "kind-$ISOLA_CLUSTER" upgrade --install isola "$ISOLA_CHART" \
+    --namespace "$ISOLA_SYSTEM_NS" \
+    --create-namespace \
+    --set sandboxNamespace.name="$ISOLA_SANDBOX_NS" \
+    --set sandboxNamespace.create=true \
+    --wait --timeout 5m
+
+  log "building proxy image $PROXY_IMAGE"
+  (cd "$ROOT" && docker build -q -t "$PROXY_IMAGE" .)
+  kind load docker-image "$PROXY_IMAGE" --name "$ISOLA_CLUSTER"
+
+  log "building Playwright image $PLAYWRIGHT_IMAGE"
+  cp "$HERE/playwright-substrate-server.js" "$HERE/server.js"
+  docker build --platform "linux/$(go env GOARCH)" \
+    -t "$PLAYWRIGHT_IMAGE" \
+    -f "$HERE/playwright-substrate.Dockerfile" "$HERE" >/dev/null
+  rm -f "$HERE/server.js"
+  log "loading $PLAYWRIGHT_IMAGE into isola cluster"
+  docker save "$PLAYWRIGHT_IMAGE" \
+    | docker exec -i "$ISOLA_CLUSTER-control-plane" \
+        ctr --namespace=k8s.io images import --no-unpack - >/dev/null
+
+  log "creating namespace $ISOLA_NS"
+  kubectl $(isola_ctx) get ns "$ISOLA_NS" >/dev/null 2>&1 \
+    || kubectl $(isola_ctx) create ns "$ISOLA_NS"
+
+  log "applying proxy RBAC"
+  sed "s/NAMESPACE/$ISOLA_NS/g" "$ROOT/deploy/rbac.yaml" \
+    | kubectl $(isola_ctx) apply -f -
+  sed "s/NAMESPACE/$ISOLA_NS/g" "$ROOT/deploy/examples/isola/rbac-patch.yaml" \
+    | kubectl $(isola_ctx) apply -f -
+
+  # Mandatory: without this, the proxy can never reach a sandbox's Playwright
+  # port — see deploy/examples/isola/networkpolicy-allow-proxy.yaml for why.
+  log "applying mandatory proxy-ingress NetworkPolicy in $ISOLA_SANDBOX_NS"
+  sed -e "s/ISOLA_NAMESPACE/$ISOLA_SANDBOX_NS/g" \
+      -e "s/PROXY_NAMESPACE/$ISOLA_NS/g" \
+      -e "s/SANDBOX_PORT/9222/g" \
+      "$ROOT/deploy/examples/isola/networkpolicy-allow-proxy.yaml" \
+    | kubectl $(isola_ctx) apply -f -
+
+  log "applying playwright scripts ConfigMap"
+  sed "s/NAMESPACE/$ISOLA_NS/g" "$HERE/playwright-scripts.yaml" \
+    | kubectl $(isola_ctx) apply -f -
+
+  log "deploying in-cluster fetch target (traefik/whoami)"
+  sed "s/NAMESPACE/$ISOLA_NS/g" "$HERE/test-target.yaml" \
+    | kubectl $(isola_ctx) apply -f -
+  kubectl $(isola_ctx) -n "$ISOLA_NS" rollout status deploy/test-target --timeout=60s
+}
+
+cmd_test_isola() {
+  local ctx ns
+  ctx=$(isola_ctx)
+  ns="$ISOLA_NS"
+
+  log "isola backend e2e: deploying proxy"
+  sed -e "s|namespace: NAMESPACE|namespace: $ns|g" \
+      -e "s|PROXY_IMAGE|$PROXY_IMAGE|g" \
+      -e "s|PLAYWRIGHT_IMAGE|$PLAYWRIGHT_IMAGE|g" \
+      "$HERE/proxy-isola.yaml" | kubectl $ctx apply -f -
+  kubectl $ctx -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl $ctx -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s
+
+  # The isola proxy ENSURE_TIMEOUT is 180s (no warmpool; full Chromium cold
+  # start), same rationale as kars.
+  local deadline=300
+
+  for id in alpha beta; do
+    kubectl $ctx -n "$ns" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
+    sed -e "s/NAMESPACE/$ns/g" -e "s/CLIENTID/$id/g" \
+      "$HERE/playwright-client-job.yaml" | kubectl $ctx apply -f -
+  done
+
+  log "waiting for playwright client Jobs (alpha + beta)"
+  for id in alpha beta; do
+    local end=$(($(date +%s) + deadline))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if kubectl $ctx -n "$ns" get job "playwright-e2e-$id" \
+           -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null \
+           | grep -q True; then
+        break
+      fi
+      if kubectl $ctx -n "$ns" get job "playwright-e2e-$id" \
+           -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null \
+           | grep -q True; then
+        log "isola: job playwright-e2e-$id failed — proxy + operator logs:"
+        kubectl $ctx -n "$ns" logs deploy/playwright-proxy --tail=40 || true
+        kubectl $ctx -n "$ISOLA_SYSTEM_NS" logs \
+          -l app.kubernetes.io/component=operator --tail=40 || true
+        fail "playwright-e2e-$id failed"
+      fi
+      sleep 2
+    done
+    [ "$(date +%s)" -lt "$end" ] || fail "playwright-e2e-$id timed out after ${deadline}s"
+  done
+
+  log "client logs:"
+  kubectl $ctx -n "$ns" logs job/playwright-e2e-alpha | sed 's/^/    [alpha] /'
+  kubectl $ctx -n "$ns" logs job/playwright-e2e-beta  | sed 's/^/    [beta]  /'
+
+  # Assert that Sandbox CRs exist, in the shared sandbox namespace.
+  for id in alpha beta; do
+    kubectl $ctx -n "$ISOLA_SANDBOX_NS" get sandbox "pw-$id" >/dev/null \
+      || fail "expected Sandbox pw-$id to exist in $ISOLA_SANDBOX_NS"
+    log "Sandbox pw-$id ✓"
+  done
+
+  # Assert distinct pod IPs (all Sandbox CRs share one namespace, unlike kars,
+  # so isolation is verified by IP rather than by namespace).
+  local ip_a ip_b
+  ip_a=$(kubectl $ctx -n "$ISOLA_SANDBOX_NS" get sandbox pw-alpha \
+    -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+  ip_b=$(kubectl $ctx -n "$ISOLA_SANDBOX_NS" get sandbox pw-beta \
+    -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+  [ -n "$ip_a" ] && [ -n "$ip_b" ] || fail "Sandbox status.podIP not populated"
+  [ "$ip_a" != "$ip_b" ]           || fail "alpha and beta share podIP: $ip_a"
+  log "pw-alpha → $ip_a ; pw-beta → $ip_b  (distinct ✓)"
+
+  log "isola e2e PASSED"
+}
+
+cmd_down_isola() {
+  # isola installs into the shared cluster ($ISOLA_CLUSTER = $CLUSTER by default);
+  # we only uninstall isola, not delete the cluster.
+  log "uninstalling isola from cluster '$ISOLA_CLUSTER'"
+  helm --kube-context "kind-$ISOLA_CLUSTER" uninstall isola --namespace "$ISOLA_SYSTEM_NS" 2>/dev/null || true
+  kubectl $(isola_ctx) delete ns "$ISOLA_NS" --ignore-not-found >/dev/null || true
+  kubectl $(isola_ctx) delete ns "$ISOLA_SANDBOX_NS" --ignore-not-found >/dev/null || true
+}
+
 # ── substrate backend ──────────────────────────────────────────────────────────
 
 SUBSTRATE_REPO="${SUBSTRATE_REPO:-$ROOT/../substrate}"
@@ -704,6 +886,8 @@ case "${1:-}" in
   down)      shift; cmd_down      "$@" ;;
   up-kars)   shift; cmd_up_kars   "$@" ;;
   down-kars) shift; cmd_down_kars "$@" ;;
+  up-isola)   shift; cmd_up_isola   "$@" ;;
+  down-isola) shift; cmd_down_isola "$@" ;;
   ""|-h|--help)
     sed -n '2,16p' "$0"
     ;;

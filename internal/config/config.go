@@ -64,6 +64,23 @@ type Config struct {
 	// KarsSandbox CRs. Required for the karssandbox backend.
 	KarsSandboxImage string
 
+	// IsolaNamespace is the single shared namespace where isola Sandbox CRs are
+	// created (must match isola's Helm value sandboxNamespace.name, e.g.
+	// "isola-sandboxes"). Required for the isola backend. Unlike KarsSandbox,
+	// this is not the proxy's own namespace — isola requires all sandboxes in
+	// one shared namespace cluster-wide.
+	IsolaNamespace string
+
+	// IsolaSandboxImage is the Playwright container image used when creating
+	// isola Sandbox CRs. Required for the isola backend.
+	IsolaSandboxImage string
+
+	// IsolaAllowedEgressCIDRs are additional CIDRs isola sandboxes may reach,
+	// beyond the default internet-egress allowance (which excepts private/
+	// cluster-internal ranges). Only needed to let the sandbox reach an
+	// in-cluster target (e.g. a test fixture Service). Optional.
+	IsolaAllowedEgressCIDRs []string
+
 	// IdleTTL is how long a session must be idle (no traffic AND no open connections) before reaping.
 	IdleTTL time.Duration
 
@@ -89,6 +106,12 @@ func FromEnv() (*Config, error) {
 		SubstrateForceBoot:     envOr("SUBSTRATE_FORCE_BOOT", "") == "true",
 		KarsInferenceRef:       os.Getenv("KARS_INFERENCE_REF"),
 		KarsSandboxImage:       os.Getenv("KARS_SANDBOX_IMAGE"),
+		IsolaNamespace:         envOr("ISOLA_NAMESPACE", "isola-sandboxes"),
+		IsolaSandboxImage:      os.Getenv("ISOLA_SANDBOX_IMAGE"),
+	}
+
+	if v := os.Getenv("ISOLA_ALLOWED_EGRESS_CIDRS"); v != "" {
+		c.IsolaAllowedEgressCIDRs = strings.Split(v, ",")
 	}
 
 	port, err := strconv.Atoi(envOr("SANDBOX_PORT", "9222"))
@@ -135,8 +158,12 @@ func FromEnv() (*Config, error) {
 		if c.KarsSandboxImage == "" {
 			return nil, fmt.Errorf("KARS_SANDBOX_IMAGE is required for karssandbox backend")
 		}
+	case "isola":
+		if c.IsolaSandboxImage == "" {
+			return nil, fmt.Errorf("ISOLA_SANDBOX_IMAGE is required for isola backend")
+		}
 	default:
-		return nil, fmt.Errorf("unknown BACKEND %q (want sandboxclaim, substrate, or karssandbox)", c.Backend)
+		return nil, fmt.Errorf("unknown BACKEND %q (want sandboxclaim, substrate, karssandbox, or isola)", c.Backend)
 	}
 	return c, nil
 }

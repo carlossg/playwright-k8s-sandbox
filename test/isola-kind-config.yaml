@@ -1,0 +1,17 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: isola-playwright
+# Single-node cluster, mirroring kars-kind-config.yaml.
+#
+# KNOWN LIMITATION: isola requires a gVisor (runsc) RuntimeClass on cluster
+# nodes for real sandbox isolation. Stock kind nodes do not ship containerd
+# configured for runsc, and installing it inside a kind node is out of scope
+# for this harness (see isola's own hack/setup.sh for the containerd config
+# isola expects). Without it, the isola operator and CRDs install fine and
+# Sandbox CRs can be created, but sandbox pods will fail to schedule/start —
+# the same failure mode kars hits without its controller installed. Treat
+# up-isola as sufficient for exercising the proxy's Ensure/Delete/List wiring
+# against the Sandbox CR API, not as a full isolation smoke test, until a
+# gVisor-capable node is available.
+nodes:
+  - role: control-plane
