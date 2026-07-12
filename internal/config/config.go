@@ -111,7 +111,11 @@ func FromEnv() (*Config, error) {
 	}
 
 	if v := os.Getenv("ISOLA_ALLOWED_EGRESS_CIDRS"); v != "" {
-		c.IsolaAllowedEgressCIDRs = strings.Split(v, ",")
+		for part := range strings.SplitSeq(v, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				c.IsolaAllowedEgressCIDRs = append(c.IsolaAllowedEgressCIDRs, trimmed)
+			}
+		}
 	}
 
 	port, err := strconv.Atoi(envOr("SANDBOX_PORT", "9222"))

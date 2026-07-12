@@ -6,10 +6,10 @@
 //
 // Lifecycle:
 //   - Ensure: get-or-create the Sandbox CR, poll status.conditions[type=Ready]
-//     until status=True (treating PodFailed/PodCreationFailed/StartupTimeoutExceeded/
-//     InvalidRuntime as terminal errors), then read status.podIP directly — the
-//     isola operator sets it on the CR itself, so no secondary Pods lookup is
-//     needed (unlike KarsSandbox).
+//     until status=True (treating PodFailed/PodSucceeded/PodCreationFailed/
+//     StartupTimeoutExceeded/InvalidRuntime as terminal errors), then read
+//     status.podIP directly — the isola operator sets it on the CR itself, so
+//     no secondary Pods lookup is needed (unlike KarsSandbox).
 //   - Delete: delete the CR; the isola operator tears down the pod under the
 //     default TerminationPolicy (Delete — no rootfs snapshot).
 //   - List: list CRs in the sandbox namespace labelled playwright-proxy/managed=true.
@@ -52,6 +52,7 @@ const isolaMaxNameLen = 47
 // that must stop polling immediately rather than be treated as "not ready yet".
 var isolaTerminalReasons = map[string]bool{
 	"PodFailed":              true,
+	"PodSucceeded":           true,
 	"PodCreationFailed":      true,
 	"StartupTimeoutExceeded": true,
 	"InvalidRuntime":         true,
@@ -83,19 +84,34 @@ func NewIsolaBackend(dyn dynamic.Interface, namespace, image string, port int, a
 }
 
 // isolaName derives the Sandbox CR name for a playwright-id. Sandbox's CEL
-// validation caps metadata.name at 47 chars. IDs that fit as "pw-"+id are used
-// verbatim (also readable via kubectl get sandbox); longer/free-form ids are
+// validation caps metadata.name at 47 chars and requires a valid DNS-1123
+// subdomain (lowercase alphanumeric, '-', '.'). playwright-id label values
+// permissibly contain uppercase letters, underscores, etc. (Kubernetes label
+// syntax is looser than a resource name), so IDs that fit as "pw-"+id are
+// used verbatim only when they're also DNS-1123-clean (also readable via
+// kubectl get sandbox); anything too long or containing invalid characters is
 // hashed to a fixed-width name instead, consistent with the label-hashing
 // guidance in docs/ARCHITECTURE.md's Caveats section. The full, unhashed id is
 // always preserved in the playwrightIDLabel label and used by List to round-trip.
 func isolaName(playwrightID string) string {
 	const prefix = "pw-"
 	name := prefix + playwrightID
-	if len(name) <= isolaMaxNameLen {
+	if len(name) <= isolaMaxNameLen && isDNS1123(playwrightID) {
 		return name
 	}
 	sum := sha256.Sum256([]byte(playwrightID))
 	return fmt.Sprintf("%s%x", prefix, sum)[:isolaMaxNameLen]
+}
+
+// isDNS1123 reports whether s contains only characters valid in a DNS-1123
+// subdomain segment (lowercase alphanumeric, '-', '.').
+func isDNS1123(s string) bool {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *IsolaBackend) Ensure(ctx context.Context, playwrightID string) (Endpoint, error) {
@@ -207,8 +223,15 @@ func (b *IsolaBackend) buildCR(name, playwrightID string) *unstructured.Unstruct
 				"spec": map[string]any{
 					"containers": []any{
 						map[string]any{
-							"name":  "playwright",
-							"image": b.image,
+							"name": "playwright",
+							// The isola operator unconditionally sets Command =
+							// [sleep, infinity] whenever this is empty — replacing
+							// the image ENTRYPOINT/CMD entirely rather than only
+							// filling in a default when both are unset — so an
+							// explicit command is required to actually launch the
+							// Playwright server (matches karssandbox.go's buildCR).
+							"command": []any{"node", "/server.js"},
+							"image":   b.image,
 							"ports": []any{
 								map[string]any{"containerPort": int64(b.port)},
 							},
