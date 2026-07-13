@@ -1,0 +1,39 @@
+# Mandatory, one-time NetworkPolicy for the isola backend.
+#
+# isola's Helm chart installs a "sandbox-default-deny" NetworkPolicy that
+# denies ALL ingress and egress to every pod labeled isola.run/sandbox=true in
+# the sandbox namespace, plus a "sandbox-allow-api-gateway-ingress" policy that
+# opens ingress ONLY from isola's own api-gateway pod, and ONLY on port 10032
+# (the sandbox sidecar's control port for command/file exec — not the
+# Playwright/Chromium port). playwright-proxy is not isola's api-gateway, so
+# without this policy the proxy's Ensure() will succeed (the Sandbox CR
+# becomes Ready) but every WS upgrade to the sandbox will hang or time out.
+#
+# Apply this once, cluster-side, in the isola sandbox namespace (ISOLA_NAMESPACE,
+# e.g. isola-sandboxes) — it is a single label-selector rule that covers every
+# Sandbox CR the proxy creates, so it is NOT created per-sandbox by the backend
+# code.
+#
+# Substitute ISOLA_NAMESPACE, PROXY_NAMESPACE, and SANDBOX_PORT before applying.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: playwright-proxy-allow-sandbox-ingress
+  namespace: ISOLA_NAMESPACE
+spec:
+  podSelector:
+    matchLabels:
+      isola.run/sandbox: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: PROXY_NAMESPACE
+          podSelector:
+            matchLabels:
+              app: playwright-proxy
+      ports:
+        - protocol: TCP
+          port: SANDBOX_PORT

@@ -1,0 +1,67 @@
+# playwright-proxy configured for the isola backend.
+# Each playwright-id gets one Sandbox CR (sandbox.isola.run/v1alpha1) that the
+# isola operator runs as a gVisor-isolated pod in a single shared namespace
+# (ISOLA_NAMESPACE) — unlike karssandbox, there is no per-sandbox namespace.
+#
+# Prerequisites:
+#   1. isola installed (helm install isola oci://ghcr.io/isola-run/charts/isola
+#      --namespace isola-system --create-namespace), with the isola-sandboxes
+#      namespace created and a gVisor RuntimeClass configured on cluster nodes.
+#   2. Playwright image built and pushed to your registry.
+#   3. RBAC patched with rbac-patch.yaml.
+#   4. networkpolicy-allow-proxy.yaml applied in the isola sandbox namespace.
+#      WITHOUT THIS THE BACKEND CANNOT WORK: isola's default-deny NetworkPolicy
+#      blocks all ingress to sandbox pods except from isola's own api-gateway,
+#      so the proxy cannot reach the Playwright port until this policy is applied.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-proxy
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playwright-proxy
+  template:
+    metadata:
+      labels:
+        app: playwright-proxy
+    spec:
+      serviceAccountName: playwright-proxy
+      containers:
+        - name: proxy
+          image: localhost:5001/playwright-proxy:latest
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: BACKEND
+              value: isola
+            - name: ISOLA_NAMESPACE
+              value: isola-sandboxes
+            - name: ISOLA_SANDBOX_IMAGE
+              value: YOUR_REGISTRY/playwright:TAG
+            # Optional: comma-separated CIDRs the sandbox may additionally reach,
+            # beyond the default internet-egress allowance (which excepts private/
+            # cluster-internal ranges). Only needed if agents must navigate to an
+            # in-cluster target.
+            # - name: ISOLA_ALLOWED_EGRESS_CIDRS
+            #   value: "10.0.0.0/8"
+            - name: SANDBOX_PORT
+              value: "9222"
+            - name: IDLE_TTL
+              value: "10m"
+            - name: ENSURE_TIMEOUT
+              value: "180s"
+          ports:
+            - name: data
+              containerPort: 9000
+            - name: mgmt
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9090
+            periodSeconds: 5

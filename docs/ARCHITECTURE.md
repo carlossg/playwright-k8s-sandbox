@@ -2,16 +2,19 @@
 
 A per-namespace HTTP/WebSocket proxy that fronts Playwright (MCP over HTTP +
 the native Playwright WebSocket server) and routes each calling agent pod to a
-dedicated Playwright sandbox. Four backends are pluggable behind a single
+dedicated Playwright sandbox. Five backends are pluggable behind a single
 interface; agent-sandbox and OpenShell share the same SandboxClaim machinery,
 substrate uses ate.dev's Actor lifecycle and atenet-router as the data plane,
-and KarsSandbox uses Azure's KARS controller for isolated namespace-scoped sandboxes.
+KarsSandbox uses Azure's KARS controller for isolated namespace-scoped sandboxes,
+and isola runs each sandbox as a gVisor-isolated `Sandbox` CR in a single shared
+namespace.
 
 - [Components](#components)
 - [Identity model](#identity-model)
 - [Session manager and idle reaper](#session-manager-and-idle-reaper)
 - [Backends](#backends)
   - [agent-sandbox](#agent-sandbox)
+  - [isola](#isola)
   - [OpenShell](#openshell)
   - [substrate](#substrate)
   - [KarsSandbox](#karssandbox)
@@ -37,7 +40,7 @@ and KarsSandbox uses Azure's KARS controller for isolated namespace-scoped sandb
 |-----------------------------|---------------------------------------|----------------|
 | `internal/identify`   | client-go shared informer on labelled pods + API list fallback | `podIP → playwright-id` lookup with cache-miss fallback to a `fieldSelector=status.podIP=X` API list. Bounded polling (100ms × 100) covers the pod-IP-not-yet-populated race. |
 | `internal/session`    | Map keyed by playwright-id            | `Ensure` is singleflight per id; `Get` returns the cached endpoint or waits on the in-flight Ensure. Reaper sweeps idle sessions when both `lastActive` and `activeConns` say it's safe. |
-| `internal/backend`    | `Backend` interface (Ensure/Delete/List) | Four implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev), `KarsSandbox` (Azure KARS). |
+| `internal/backend`    | `Backend` interface (Ensure/Delete/List) | Five implementations: `SandboxClaim` (agent-sandbox + openshell), `Substrate` (ate.dev), `KarsSandbox` (Azure KARS), `IsolaBackend` (isola/gVisor). |
 | `cmd/playwright-proxy`| `main.go`                             | Wires it together. `/readyz` blocks until `identify.Index.Ready()` (i.e. the informer cache has synced) so kube probes don't admit traffic before pod identity is resolvable. |
 
 ## Identity model
@@ -98,7 +101,7 @@ keeps the sandbox alive.
 
 ## Backends
 
-All four implement the same interface:
+All five implement the same interface:
 
 ```go
 type Backend interface {
@@ -113,11 +116,12 @@ Quick comparison:
 | Backend       | Sandbox unit       | State across reaps? | Cold-start cost |
 |---------------|--------------------|---------------------|-----------------|
 | agent-sandbox | `SandboxClaim` → warm pod | **No** — claim deleted ⇒ pod destroyed; next call gets a fresh pod | ~0.6s (warmpool is pre-warmed; main cost is the WS handshake) |
+| isola         | `Sandbox` CR → gVisor-isolated pod in a shared namespace | **No** — CR deleted (default `TerminationPolicy=Delete`) ⇒ pod destroyed; next call gets a fresh sandbox. (A `SnapshotRootfs` termination type exists in isola but is unused by this backend.) | Variable (gVisor pod cold-start + image pull; no warm pool) |
 | openshell     | `SandboxClaim` → warm pod (openshell image) | **No** — same as agent-sandbox | ~0.6s |
 | substrate     | `Actor` → gVisor sandbox on a worker pod | **Designed to**, via gVisor checkpoint/restore; **disabled here** (`SUBSTRATE_FORCE_BOOT=true`) because restore is broken in this environment | ~3.6s with boot-from-spec; would be sub-second with working snapshot restore |
 | karssandbox   | `KarsSandbox` CR → namespaced pod | **No** — CR deleted ⇒ namespace + pod destroyed; next call gets a fresh isolated sandbox | Variable (depends on KARS controller + image pull; typically similar to agent-sandbox) |
 
-Across all four, "sticky while alive" still holds: as long as the proxy's
+Across all five, "sticky while alive" still holds: as long as the proxy's
 session is not reaped (idle timer + no live connections), repeat calls from
 the same id always hit the same sandbox. The difference is whether state
 *survives* a reap/restart.
@@ -175,6 +179,170 @@ sequenceDiagram
 Idempotency: a second caller for the same id finds the existing claim and
 short-circuits to the bound endpoint. `Delete` deletes the claim; the
 controller releases the pod back to the pool.
+
+### isola
+
+One `Sandbox` custom resource (`sandbox.isola.run/v1alpha1`) per `playwright-id`,
+using [isola](https://github.com/isola-run/isola)'s Kubernetes operator and
+gVisor for per-pod syscall-level isolation. **Unlike agent-sandbox, there is no
+warm pool**: every `Ensure` for a new id creates a brand-new Sandbox CR and
+waits for the operator to schedule and start a pod from scratch, rather than
+binding an already-running pod from a pre-warmed `SandboxWarmPool`. All Sandbox
+CRs (and their pods) still live in one shared, pre-existing namespace
+(`ISOLA_NAMESPACE`, e.g. `isola-sandboxes`) — topologically similar to
+agent-sandbox's warm-pool namespace, just without the pool. The proxy polls the
+CR's `status.conditions[type=Ready]` until `status=True`, then reads
+`status.podIP` directly off the CR — structurally the same single-CR-poll
+pattern as agent-sandbox's `SandboxClaim.status.podName`/`endpoint`, just
+without a pool to bind from.
+
+**State across runs:** none. A Sandbox CR's default `TerminationPolicy.Type`
+is `Delete`: when the CR is deleted (idle reap, or `Delete(id)`) the pod is
+torn down and the next caller for the same id gets a brand-new sandbox — same
+"no memory of the previous session" behavior as agent-sandbox. (isola also
+supports a `SnapshotRootfs` termination type that snapshots the rootfs overlay
+to S3/GCS/Azure for later restore into a new sandbox via
+`rootfsSnapshotSources` — the closest isola analogue to substrate's gVisor
+checkpoint/restore, but simpler and more mature: it's an async job backed by
+cloud storage rather than a live sentry checkpoint. This backend does not use
+it today; wiring it in is a natural follow-up for state persistence across
+reaps.)
+
+**Key differences from agent-sandbox:**
+- **No warm pool**: agent-sandbox binds an already-running pod from a
+  `SandboxWarmPool` in ~0.6s; isola creates a pod from scratch on every
+  `Ensure`, so cold start is bounded by image pull + gVisor pod scheduling
+  rather than a claim-and-bind operation.
+- **gVisor isolation, not just the node's default runtime**: agent-sandbox
+  pods run under whichever container runtime the cluster uses by default
+  (typically runc — standard Linux namespace/cgroup isolation); isola pods run
+  under a gVisor `RuntimeClass`, adding a syscall-interception security
+  boundary — relevant for untrusted or AI-generated code — at the cost of
+  gVisor's overhead.
+- **Sandbox spec embedded in the CR, not a separate template**: agent-sandbox
+  pods are defined ahead of time via a separate `SandboxTemplate` +
+  `SandboxWarmPool` that the claim references; isola's Sandbox CR embeds the
+  pod spec directly (`spec.podTemplate`), so there's no separate
+  template/pool object to provision.
+- **NetworkPolicy required for proxy ingress**: agent-sandbox pods have no
+  special NetworkPolicy restricting proxy access — the proxy just reaches the
+  bound pod's IP directly. isola's Helm chart installs a default-deny
+  NetworkPolicy on every sandbox pod that blocks all ingress except from
+  isola's own api-gateway, so a companion NetworkPolicy must be applied for
+  the proxy to reach the Playwright port at all (see the callout below).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as Client pod<br/>(playwright-id=epsilon)
+    participant P as playwright-proxy
+    participant K as kube-apiserver
+    participant Op as isola operator
+    participant SBox as Sandbox pod<br/>(gVisor, ns isola-sandboxes)
+
+    Cl->>P: WS upgrade<br/>HTTP/1.1 GET / Upgrade: websocket
+    P->>P: identify by source IP →<br/>playwright-id=epsilon
+    P->>P: session cache miss →<br/>Backend.Ensure("epsilon")
+
+    P->>K: GET Sandbox pw-epsilon -n isola-sandboxes
+    K-->>P: 404 NotFound
+    P->>K: POST Sandbox pw-epsilon<br/>spec.podTemplate.spec.containers[0].image=playwright-image
+    K-->>P: 201 Created
+
+    Note over Op: Sandbox reconcile
+    Op->>K: create pod (gVisor RuntimeClass,<br/>label isola.run/sandbox=true)
+    K-->>Op: ok
+    Op->>K: Sandbox.status.conditions[Ready]=False<br/>reason=PodPending
+    Op->>K: Sandbox.status.conditions[Ready]=True<br/>reason=PodRunning, podIP=10.244.x.y
+    K-->>Op: ok
+
+    loop until Ready=True
+        P->>K: GET Sandbox pw-epsilon
+        K-->>P: Ready=False, reason=PodPending → poll
+    end
+    K-->>P: Ready=True, reason=PodRunning, podIP=10.244.x.y
+
+    P-->>Cl: hijack TCP, forward upgrade
+    P->>SBox: HTTP/1.1 GET / Upgrade: websocket<br/>10.244.x.y:9222
+    SBox-->>P: 101 Switching Protocols
+    P-->>Cl: 101 Switching Protocols
+    Note over Cl,SBox: bidirectional bytes via hijacked TCP<br/>(requires the NetworkPolicy callout below!)
+```
+
+> **NetworkPolicy gotcha — read this before deploying isola.**
+> isola's Helm chart installs a `sandbox-default-deny` `NetworkPolicy` that
+> denies **all** ingress and egress to every pod labeled `isola.run/sandbox: "true"`
+> in the sandbox namespace, plus a `sandbox-allow-api-gateway-ingress` policy
+> that opens ingress **only** from isola's own `api-gateway` pod, and **only**
+> on port `10032` (the sandbox sidecar's control port for command/file exec —
+> not the Playwright/Chromium port). playwright-proxy is not isola's
+> api-gateway, so **out of the box the proxy cannot reach a sandbox pod's
+> Playwright port at all** — every WS upgrade will hang/timeout after
+> `Ensure` succeeds. You must apply
+> `deploy/examples/isola/networkpolicy-allow-proxy.yaml` once (cluster-side,
+> in the sandbox namespace) to open ingress from the playwright-proxy pod to
+> `isola.run/sandbox=true` pods on `SANDBOX_PORT`. This is a single static,
+> label-selector-based policy — it is **not** created per-sandbox by the
+> backend code, since one rule already covers every Sandbox CR the proxy
+> creates.
+
+**Egress:** the operator's own default is deny-all egress *and* a DNS sink,
+which would leave a sandbox unable to resolve or reach anything an agent
+navigates to. `IsolaBackend` therefore sets `spec.network.allowInternetEgress`
+and `allowClusterDNS` to `true` on every Sandbox it creates — a sensible
+default for a backend whose whole purpose is browsing arbitrary pages. Note
+that `allowInternetEgress` does **not** open private/cluster-internal ranges
+(isola excepts them even with internet egress on), so reaching an in-cluster
+target (e.g. a test fixture Service) additionally requires its CIDR in
+`ISOLA_ALLOWED_EGRESS_CIDRS` (optional, comma-separated; see Configuration below).
+
+**Configuration:**
+```bash
+BACKEND=isola
+ISOLA_NAMESPACE=isola-sandboxes                # Default; must match isola's
+                                                # Helm value sandboxNamespace.name
+ISOLA_SANDBOX_IMAGE=<your-playwright-image>    # Required: sandbox container image
+ISOLA_ALLOWED_EGRESS_CIDRS=10.0.0.0/8          # Optional: extra egress CIDRs
+                                                # beyond the default internet-egress
+                                                # allowance (see Egress note above)
+SANDBOX_PORT=9222                              # Default: application listen port
+```
+
+**RBAC requirements:**
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playwright-proxy-isola
+rules:
+- apiGroups: ["sandbox.isola.run"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["sandbox.isola.run"]
+  resources: ["sandboxes/status"]
+  verbs: ["get"]
+```
+Note: no `pods` RBAC is needed — `status.podIP` comes straight off the Sandbox CR.
+
+See `deploy/examples/isola/` for complete deployment manifests, including the
+mandatory NetworkPolicy described above.
+
+**Testing:**
+```bash
+# Install isola (operator + CRDs) into the existing cluster. Requires a gVisor
+# RuntimeClass on cluster nodes for real isolation — see the up-isola comments
+# in test/harness.sh for the known gVisor-in-kind limitation.
+./test/harness.sh up-isola
+
+# Run integration tests
+./test/harness.sh test isola
+
+# Run benchmarks (cold/warm/restore)
+./test/bench.sh isola
+
+# Cleanup
+./test/harness.sh down-isola
+```
 
 ### OpenShell
 
@@ -419,8 +587,9 @@ proxy configuration, RBAC patches, and InferencePolicy examples.
 
 ## Bench harness and results
 
-`proxy/test/bench.sh` exercises three scenarios per backend (note: KARS backend
-benchmarks are available but results not yet included in the table below):
+`proxy/test/bench.sh` exercises three scenarios per backend (note: KARS and
+isola backend benchmarks are available but results not yet included in the
+table below):
 
 | Scenario   | What it measures |
 |------------|------------------|
@@ -480,11 +649,13 @@ Reading the numbers:
 ( cd substrate && hack/create-kind-cluster.sh \
     && hack/install-ate-kind.sh --deploy-ate-system ) # 'kind' cluster for substrate
 ./test/harness.sh up-kars                       # KARS cluster with controller
+./test/harness.sh up-isola                      # isola cluster with operator (gVisor RuntimeClass)
 
 # Run the full bench
-./test/bench.sh all                             # agent-sandbox + openshell + substrate
+./test/bench.sh all                             # agent-sandbox + openshell + substrate + kars + isola
 ./test/bench.sh substrate                       # substrate only
 ./test/bench.sh kars                            # KARS only
+./test/bench.sh isola                           # isola only
 ```
 
 `bench.sh` does a `kubectl-ate admin debug-flush-redis` and a worker recycle
@@ -501,7 +672,10 @@ bundle is still warm in `/run/ateom-gvisor`.
   them at the pod-admission layer or layer in SPIFFE / token validation.
 - Label values must satisfy Kubernetes label constraints (≤63 chars,
   `[a-zA-Z0-9._-]`). For longer/free-form ids, hash into the label and stash
-  the original in an annotation.
+  the original in an annotation. isola's Sandbox CRD has an even tighter
+  constraint — `metadata.name` is capped at 47 chars — so `internal/backend/isola.go`'s
+  `isolaName` hashes into the CR name itself when `"pw-" + id` would exceed it
+  (see the [isola](#isola) section).
 - The substrate workaround keeps `SUBSTRATE_FORCE_BOOT=true` on by default in
   `proxy/test/proxy-substrate.yaml`. Once substrate's snapshot restore is
   fixed upstream, flip it back to `false` to get sub-second cold-starts via

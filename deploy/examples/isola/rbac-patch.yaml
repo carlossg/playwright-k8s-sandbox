@@ -1,0 +1,33 @@
+# Additional RBAC rules for the isola backend.
+# Patch these into the ClusterRole defined in proxy/deploy/rbac.yaml, or
+# create a separate Role if the proxy is namespace-scoped.
+#
+# One permission beyond the base rbac.yaml:
+#   1. Sandbox CRDs in the isola sandbox namespace (create/get/list/watch/delete).
+# No pods RBAC is needed: unlike karssandbox, the Sandbox CR's status.podIP is
+# populated directly by the isola operator, so the proxy never lists pods.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playwright-proxy-isola
+rules:
+  - apiGroups: ["sandbox.isola.run"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["sandbox.isola.run"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: playwright-proxy-isola
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: playwright-proxy-isola
+subjects:
+  - kind: ServiceAccount
+    name: playwright-proxy
+    namespace: NAMESPACE

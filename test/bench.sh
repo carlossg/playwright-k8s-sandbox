@@ -5,20 +5,24 @@
 #   cold     — no Playwright runtime exists for the playwright-id; first request
 #              has to provision it (sandboxclaim → claim+sandbox, substrate →
 #              CreateActor + restore-from-golden, kars → KarsSandbox CR create +
-#              controller reconcile + pod schedule + Chromium start)
+#              controller reconcile + pod schedule + Chromium start, isola →
+#              Sandbox CR create + operator reconcile + gVisor pod start)
 #   warm     — runtime already exists for the id; just connect+fetch
 #   restore  — for substrate only as a *distinct* path: the actor was previously
 #              running and then suspended; ResumeActor restores from the
 #              per-actor snapshot (not the golden one). agent-sandbox, openshell,
-#              and kars don't have a hibernate model, so 'restore' there is the
-#              same code path as 'cold' (sandbox is destroyed and recreated).
+#              kars, and isola don't have a hibernate model wired up here (isola
+#              supports a rootfs-snapshot termination policy, unused by this
+#              backend today), so 'restore' there is the same code path as
+#              'cold' (sandbox is destroyed and recreated).
 #
 # Per-backend usage:
 #   ./bench.sh agent-sandbox
 #   ./bench.sh openshell
 #   ./bench.sh substrate
 #   ./bench.sh kars
-#   ./bench.sh all                  # runs all four, prints a combined markdown table
+#   ./bench.sh isola
+#   ./bench.sh all                  # runs all five, prints a combined markdown table
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +31,9 @@ ROOT="$(cd "$HERE/.." && pwd)"
 SLIM_IMAGE_TAG="localhost:5001/playwright-substrate:slim-1.49.1"
 KARS_CLUSTER="${KARS_CLUSTER:-kars-playwright}"
 KARS_NS="${KARS_NS:-pw-kars}"
+ISOLA_CLUSTER="${ISOLA_CLUSTER:-isola-playwright}"
+ISOLA_NS="${ISOLA_NS:-pw-isola}"
+ISOLA_SANDBOX_NS="${ISOLA_SANDBOX_NS:-isola-sandboxes}"
 RESULTS_FILE="${RESULTS_FILE:-/tmp/bench-results.csv}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -466,6 +473,101 @@ bench_kars() {
   fi
 }
 
+# -------------------------------- isola --------------------------------------
+
+# Delete the Sandbox CR and wait for the operator to finish tearing down the
+# pod, then restart the proxy so its in-memory session map is cleared before
+# the next cold scenario. Unlike kars, all Sandbox CRs and pods share one
+# namespace ($ISOLA_SANDBOX_NS), so there is no per-sandbox namespace to wait on.
+wipe_isola_sandbox() {
+  local ns=$1 ctx=$2 id=$3
+  local cr="pw-$id"
+
+  kubectl --context "$ctx" -n "$ISOLA_SANDBOX_NS" delete sandbox "$cr" --ignore-not-found >/dev/null 2>&1 || true
+
+  # Wait for the operator to finish deleting the sandbox pod (up to 60s).
+  local end=$(($(date +%s) + 60))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    if ! kubectl --context "$ctx" get sandbox -n "$ISOLA_SANDBOX_NS" "$cr" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+
+  # Clear proxy session cache.
+  kubectl --context "$ctx" -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl --context "$ctx" -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s >/dev/null
+  wait_for_proxy_ready "$ns" "$ctx"
+}
+
+bench_isola() {
+  local ctx="--context=kind-$ISOLA_CLUSTER"
+  local ns="$ISOLA_NS"
+  local id="bench-isola"
+
+  log "[isola] preparing (cluster=$ISOLA_CLUSTER, ns=$ns, sandbox-ns=$ISOLA_SANDBOX_NS)"
+
+  # The isola cluster must already be up (harness.sh up-isola). Verify it.
+  if ! kubectl $ctx get ns "$ISOLA_SANDBOX_NS" >/dev/null 2>&1; then
+    warn "[isola] $ISOLA_SANDBOX_NS namespace not found in cluster '$ISOLA_CLUSTER'"
+    warn "        Run: ./harness.sh up-isola"
+    record isola cold  FAIL "{}"
+    record isola warm  FAIL "{}"
+    record isola restore FAIL "{}"
+    return 1
+  fi
+
+  ensure_image_in_cluster "$ISOLA_CLUSTER"
+  ensure_bench_deps "$ns" "$ctx"
+  ensure_labelled_probe_pod "$ns" "$ctx"
+
+  log "[isola] deploying proxy (BACKEND=isola, SANDBOX_PORT=9222)"
+  sed -e "s|namespace: NAMESPACE|namespace: $ns|g" \
+      -e "s|PROXY_IMAGE|playwright-proxy:dev|g" \
+      -e "s|PLAYWRIGHT_IMAGE|$SLIM_IMAGE_TAG|g" \
+      "$HERE/proxy-isola.yaml" | kubectl $ctx apply -f - >/dev/null
+  kubectl $ctx -n "$ns" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
+  kubectl $ctx -n "$ns" rollout status  deploy/playwright-proxy --timeout=120s >/dev/null
+
+  # isola cold starts are slow (no warmpool; CR reconcile + gVisor pod +
+  # Chromium). Give the bench client 300s — well above the 180s ENSURE_TIMEOUT
+  # on the proxy.
+  local cold_deadline=300
+
+  local target_url="http://test-target.${ns}.svc.cluster.local/"
+
+  # cold
+  log "[isola cold] wiping prior sandbox"
+  wipe_isola_sandbox "$ns" "$ctx" "$id"
+  log "[isola cold] running client"
+  if out=$(run_client isola cold "$ns" "$ctx" "$id" "$target_url" "$cold_deadline"); then
+    record isola cold PASS "${out#BENCH }"
+    log "[isola cold] $out"
+  else
+    record isola cold FAIL "{}"
+  fi
+
+  # warm — reuse the running sandbox
+  log "[isola warm] running client (same id, sandbox already running)"
+  if out=$(run_client isola warm "$ns" "$ctx" "$id" "$target_url" 60); then
+    record isola warm PASS "${out#BENCH }"
+    log "[isola warm] $out"
+  else
+    record isola warm FAIL "{}"
+  fi
+
+  # restore — same code path as cold for isola (default TerminationPolicy is
+  # Delete; no rootfs snapshot is taken)
+  log "[isola restore] wiping (same as cold — no snapshot taken by this backend)"
+  wipe_isola_sandbox "$ns" "$ctx" "$id"
+  if out=$(run_client isola restore "$ns" "$ctx" "$id" "$target_url" "$cold_deadline"); then
+    record isola restore PASS "${out#BENCH }"
+    log "[isola restore] $out"
+  else
+    record isola restore FAIL "{}"
+  fi
+}
+
 # ----------------------------- main ----------------------------------------
 
 print_table() {
@@ -492,13 +594,15 @@ main() {
     openshell)     bench_sandboxclaim openshell     pw-test kind-playwright-proxy playwright-proxy ;;
     substrate)     bench_substrate ;;
     kars)          bench_kars ;;
+    isola)         bench_isola ;;
     all)
       bench_sandboxclaim agent-sandbox pw-test kind-playwright-proxy playwright-proxy
       bench_sandboxclaim openshell     pw-test kind-playwright-proxy playwright-proxy
       bench_substrate
       bench_kars
+      bench_isola
       ;;
-    *) fail "usage: $0 {agent-sandbox|openshell|substrate|kars|all}" ;;
+    *) fail "usage: $0 {agent-sandbox|openshell|substrate|kars|isola|all}" ;;
   esac
   print_table
 }
