@@ -20,8 +20,7 @@ import (
 )
 
 const (
-	managedByLabel    = "playwright-proxy/managed"
-	playwrightIDLabel = "playwright-id"
+	managedByLabel = "playwright-proxy/managed"
 )
 
 // SandboxClaim lives in the extensions API group; the core Sandbox / SandboxStatus
@@ -38,20 +37,22 @@ var sandboxClaimGVR = schema.GroupVersionResource{
 const sandboxClaimAPIVersion = "extensions.agents.x-k8s.io/v1alpha1"
 
 type SandboxClaim struct {
-	client       dynamic.NamespaceableResourceInterface
-	namespace    string
-	templateName string
-	warmPoolName string
-	port         int
+	client              dynamic.NamespaceableResourceInterface
+	namespace           string
+	templateName        string
+	warmPoolName        string
+	port                int
+	playwrightIDLabelKey string
 }
 
-func NewSandboxClaim(dc dynamic.Interface, namespace, templateName, warmPoolName string, port int) *SandboxClaim {
+func NewSandboxClaim(dc dynamic.Interface, namespace, templateName, warmPoolName string, port int, labelKey string) *SandboxClaim {
 	return &SandboxClaim{
-		client:       dc.Resource(sandboxClaimGVR),
-		namespace:    namespace,
-		templateName: templateName,
-		warmPoolName: warmPoolName,
-		port:         port,
+		client:              dc.Resource(sandboxClaimGVR),
+		namespace:           namespace,
+		templateName:        templateName,
+		warmPoolName:        warmPoolName,
+		port:                port,
+		playwrightIDLabelKey: labelKey,
 	}
 }
 
@@ -120,7 +121,7 @@ func (s *SandboxClaim) List(ctx context.Context) ([]string, error) {
 	}
 	ids := make([]string, 0, len(list.Items))
 	for _, it := range list.Items {
-		if id := it.GetLabels()[playwrightIDLabel]; id != "" {
+		if id := it.GetLabels()[s.playwrightIDLabelKey]; id != "" {
 			ids = append(ids, id)
 		}
 	}
@@ -135,8 +136,8 @@ func (s *SandboxClaim) buildClaim(name, playwrightID string) *unstructured.Unstr
 			"name":      name,
 			"namespace": s.namespace,
 			"labels": map[string]any{
-				managedByLabel:    "true",
-				playwrightIDLabel: playwrightID,
+				managedByLabel:          "true",
+				s.playwrightIDLabelKey: playwrightID,
 			},
 		},
 		"spec": map[string]any{
@@ -146,7 +147,7 @@ func (s *SandboxClaim) buildClaim(name, playwrightID string) *unstructured.Unstr
 			"warmpool": s.warmPoolName,
 			"additionalPodMetadata": map[string]any{
 				"labels": map[string]any{
-					playwrightIDLabel: playwrightID,
+					s.playwrightIDLabelKey: playwrightID,
 				},
 			},
 		},
