@@ -259,7 +259,7 @@ if [ "$TEST_WS" = true ]; then
     pass "client $client_id completed"
 
     # Show timing
-    local timing=$(extract_timing "playwright-test-${client_id}")
+    timing=$(extract_timing "playwright-test-${client_id}")
     if [ "$timing" != "{}" ]; then
       info "timing: $timing"
     fi
@@ -274,9 +274,9 @@ if [ "$TEST_WS" = true ]; then
 
     case "$BACKEND_TYPE" in
       sandboxclaim)
-        local sb_0=$(kubectl -n "$NAMESPACE" get sandboxclaim "pw-${CLIENT_ARRAY[0]}" \
+        sb_0=$(kubectl -n "$NAMESPACE" get sandboxclaim "pw-${CLIENT_ARRAY[0]}" \
           -o jsonpath='{.status.sandbox.name}' 2>/dev/null || echo "")
-        local sb_1=$(kubectl -n "$NAMESPACE" get sandboxclaim "pw-${CLIENT_ARRAY[1]}" \
+        sb_1=$(kubectl -n "$NAMESPACE" get sandboxclaim "pw-${CLIENT_ARRAY[1]}" \
           -o jsonpath='{.status.sandbox.name}' 2>/dev/null || echo "")
 
         if [ -n "$sb_0" ] && [ -n "$sb_1" ] && [ "$sb_0" != "$sb_1" ]; then
@@ -287,13 +287,13 @@ if [ "$TEST_WS" = true ]; then
         ;;
 
       isola)
-        local isola_ns=$(kubectl -n "$NAMESPACE" get deploy playwright-proxy \
+        isola_ns=$(kubectl -n "$NAMESPACE" get deploy playwright-proxy \
           -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ISOLA_NAMESPACE")].value}' \
           2>/dev/null || echo "isola-sandboxes")
 
-        local ip_0=$(kubectl -n "$isola_ns" get sandbox "pw-${CLIENT_ARRAY[0]}" \
+        ip_0=$(kubectl -n "$isola_ns" get sandbox "pw-${CLIENT_ARRAY[0]}" \
           -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
-        local ip_1=$(kubectl -n "$isola_ns" get sandbox "pw-${CLIENT_ARRAY[1]}" \
+        ip_1=$(kubectl -n "$isola_ns" get sandbox "pw-${CLIENT_ARRAY[1]}" \
           -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
 
         if [ -n "$ip_0" ] && [ -n "$ip_1" ] && [ "$ip_0" != "$ip_1" ]; then
@@ -304,8 +304,8 @@ if [ "$TEST_WS" = true ]; then
         ;;
 
       karssandbox)
-        local ns_0="pw-${CLIENT_ARRAY[0]}"
-        local ns_1="pw-${CLIENT_ARRAY[1]}"
+        ns_0="pw-${CLIENT_ARRAY[0]}"
+        ns_1="pw-${CLIENT_ARRAY[1]}"
         if kubectl get ns "$ns_0" >/dev/null 2>&1 && kubectl get ns "$ns_1" >/dev/null 2>&1; then
           pass "distinct namespaces: $ns_0, $ns_1"
         else
@@ -339,7 +339,7 @@ if [ "$CLEANUP" = true ]; then
         kubectl -n "$NAMESPACE" delete sandboxclaim "pw-${client_id}" --ignore-not-found >/dev/null 2>&1 || true
         ;;
       isola)
-        local isola_ns=$(kubectl -n "$NAMESPACE" get deploy playwright-proxy \
+        isola_ns=$(kubectl -n "$NAMESPACE" get deploy playwright-proxy \
           -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ISOLA_NAMESPACE")].value}' \
           2>/dev/null || echo "isola-sandboxes")
         kubectl -n "$isola_ns" delete sandbox "pw-${client_id}" --ignore-not-found >/dev/null 2>&1 || true
