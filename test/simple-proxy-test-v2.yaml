@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simple-test-script
+  namespace: NAMESPACE
+data:
+  test.sh: |
+    #!/bin/bash
+    set -e
+    echo "Testing playwright proxy at $PROXY_URL"
+    echo "Client ID: $CLIENT_ID"
+
+    # Test HTTP endpoint (health check or MCP endpoint)
+    echo "==> Testing HTTP connectivity..."
+    if curl -v -f --max-time 10 "$PROXY_URL/healthz" 2>&1 | tee /tmp/health.log; then
+      echo "✓ Health endpoint responded"
+    else
+      echo "Health endpoint test (may not exist, trying root)"
+      curl -v --max-time 10 "$PROXY_URL/" 2>&1 | head -20 || true
+    fi
+
+    echo ""
+    echo "==> Testing WebSocket upgrade..."
+    # Try WebSocket connection
+    if command -v websocat >/dev/null 2>&1; then
+      echo "test" | timeout 5 websocat "$WS_URL" || echo "WebSocket connection attempt (may timeout if no protocol match)"
+    else
+      # Use curl to test WS upgrade
+      curl -v --max-time 5 \
+        -H "Connection: Upgrade" \
+        -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" \
+        -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+        "$PROXY_URL/" 2>&1 | head -30 || true
+    fi
+
+    echo ""
+    echo "Test completed for client: $CLIENT_ID"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: simple-test-CLIENTID
+  namespace: NAMESPACE
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: simple-test-client
+        sandbox.users.io/playwright-id: CLIENTID
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: client
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "/scripts/test.sh"]
+          env:
+            - name: PROXY_URL
+              value: "http://SERVICENAME:SERVICEPORT"
+            - name: WS_URL
+              value: "ws://SERVICENAME:SERVICEPORT/"
+            - name: CLIENT_ID
+              value: "CLIENTID"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: simple-test-script
+            defaultMode: 0755
