@@ -59,11 +59,12 @@ var isolaTerminalReasons = map[string]bool{
 }
 
 type IsolaBackend struct {
-	dynClient          dynamic.NamespaceableResourceInterface
-	namespace          string   // shared sandbox namespace (ISOLA_NAMESPACE), not the proxy's own namespace
-	image              string   // Playwright container image
-	port               int      // port the Playwright server listens on inside the pod
-	allowedEgressCIDRs []string // additional egress CIDRs, e.g. for in-cluster fetch targets; see NewIsolaBackend
+	dynClient             dynamic.NamespaceableResourceInterface
+	namespace             string   // shared sandbox namespace (ISOLA_NAMESPACE), not the proxy's own namespace
+	image                 string   // Playwright container image
+	port                  int      // port the Playwright server listens on inside the pod
+	allowedEgressCIDRs    []string // additional egress CIDRs, e.g. for in-cluster fetch targets; see NewIsolaBackend
+	playwrightIDLabelKey string   // configurable label key for playwright-id
 }
 
 // NewIsolaBackend constructs an IsolaBackend. allowedEgressCIDRs is optional
@@ -73,13 +74,14 @@ type IsolaBackend struct {
 // target (e.g. a test fixture Service) requires listing its CIDR here
 // explicitly. Production deployments that only need general web browsing can
 // leave this nil.
-func NewIsolaBackend(dyn dynamic.Interface, namespace, image string, port int, allowedEgressCIDRs []string) *IsolaBackend {
+func NewIsolaBackend(dyn dynamic.Interface, namespace, image string, port int, allowedEgressCIDRs []string, labelKey string) *IsolaBackend {
 	return &IsolaBackend{
-		dynClient:          dyn.Resource(isolaSandboxGVR),
-		namespace:          namespace,
-		image:              image,
-		port:               port,
-		allowedEgressCIDRs: allowedEgressCIDRs,
+		dynClient:             dyn.Resource(isolaSandboxGVR),
+		namespace:             namespace,
+		image:                 image,
+		port:                  port,
+		allowedEgressCIDRs:    allowedEgressCIDRs,
+		playwrightIDLabelKey: labelKey,
 	}
 }
 
@@ -195,7 +197,7 @@ func (b *IsolaBackend) List(ctx context.Context) ([]string, error) {
 	}
 	ids := make([]string, 0, len(list.Items))
 	for _, it := range list.Items {
-		if id := it.GetLabels()[playwrightIDLabel]; id != "" {
+		if id := it.GetLabels()[b.playwrightIDLabelKey]; id != "" {
 			ids = append(ids, id)
 		}
 	}
@@ -210,8 +212,8 @@ func (b *IsolaBackend) buildCR(name, playwrightID string) *unstructured.Unstruct
 			"name":      name,
 			"namespace": b.namespace,
 			"labels": map[string]any{
-				managedByLabel:    "true",
-				playwrightIDLabel: playwrightID,
+				managedByLabel:          "true",
+				b.playwrightIDLabelKey: playwrightID,
 			},
 		},
 		"spec": map[string]any{

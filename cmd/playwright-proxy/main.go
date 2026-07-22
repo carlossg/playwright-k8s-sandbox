@@ -67,9 +67,9 @@ func run(log *slog.Logger) error {
 			return err
 		}
 	case "karssandbox":
-		bk = backend.NewKarsSandbox(dyn, clientset, cfg.Namespace, cfg.KarsInferenceRef, cfg.KarsSandboxImage, cfg.SandboxPort)
+		bk = backend.NewKarsSandbox(dyn, clientset, cfg.Namespace, cfg.KarsInferenceRef, cfg.KarsSandboxImage, cfg.SandboxPort, cfg.LabelKey)
 	case "isola":
-		bk = backend.NewIsolaBackend(dyn, cfg.IsolaNamespace, cfg.IsolaSandboxImage, cfg.SandboxPort, cfg.IsolaAllowedEgressCIDRs)
+		bk = backend.NewIsolaBackend(dyn, cfg.IsolaNamespace, cfg.IsolaSandboxImage, cfg.SandboxPort, cfg.IsolaAllowedEgressCIDRs, cfg.LabelKey)
 	default:
 		return fmt.Errorf("unknown backend %q", cfg.Backend)
 	}

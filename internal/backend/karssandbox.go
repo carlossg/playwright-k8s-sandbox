@@ -38,12 +38,13 @@ const karsSandboxAPIVersion = "kars.azure.com/v1alpha1"
 const karsSandboxComponentLabel = "kars.azure.com/component=sandbox"
 
 type KarsSandboxBackend struct {
-	dynClient    dynamic.NamespaceableResourceInterface
-	k8s          kubernetes.Interface
-	namespace    string // namespace where the KarsSandbox CR lives
-	inferenceRef string // name of the InferencePolicy CR in that namespace
-	image        string // Playwright container image
-	port         int    // port the Playwright server listens on inside the pod
+	dynClient             dynamic.NamespaceableResourceInterface
+	k8s                   kubernetes.Interface
+	namespace             string // namespace where the KarsSandbox CR lives
+	inferenceRef          string // name of the InferencePolicy CR in that namespace
+	image                 string // Playwright container image
+	port                  int    // port the Playwright server listens on inside the pod
+	playwrightIDLabelKey string // configurable label key for playwright-id
 }
 
 func NewKarsSandbox(
@@ -51,14 +52,16 @@ func NewKarsSandbox(
 	k8s kubernetes.Interface,
 	namespace, inferenceRef, image string,
 	port int,
+	labelKey string,
 ) *KarsSandboxBackend {
 	return &KarsSandboxBackend{
-		dynClient:    dyn.Resource(karsSandboxGVR),
-		k8s:          k8s,
-		namespace:    namespace,
-		inferenceRef: inferenceRef,
-		image:        image,
-		port:         port,
+		dynClient:             dyn.Resource(karsSandboxGVR),
+		k8s:                   k8s,
+		namespace:             namespace,
+		inferenceRef:          inferenceRef,
+		image:                 image,
+		port:                  port,
+		playwrightIDLabelKey: labelKey,
 	}
 }
 
@@ -177,7 +180,7 @@ func (k *KarsSandboxBackend) List(ctx context.Context) ([]string, error) {
 	}
 	ids := make([]string, 0, len(list.Items))
 	for _, it := range list.Items {
-		if id := it.GetLabels()[playwrightIDLabel]; id != "" {
+		if id := it.GetLabels()[k.playwrightIDLabelKey]; id != "" {
 			ids = append(ids, id)
 		}
 	}
@@ -192,8 +195,8 @@ func (k *KarsSandboxBackend) buildCR(name, playwrightID string) *unstructured.Un
 			"name":      name,
 			"namespace": k.namespace,
 			"labels": map[string]any{
-				managedByLabel:    "true",
-				playwrightIDLabel: playwrightID,
+				managedByLabel:          "true",
+				k.playwrightIDLabelKey: playwrightID,
 			},
 		},
 		"spec": map[string]any{
