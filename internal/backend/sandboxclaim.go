@@ -30,11 +30,11 @@ const (
 // released), so bumping the version when it ships is a constant change.
 var sandboxClaimGVR = schema.GroupVersionResource{
 	Group:    "extensions.agents.x-k8s.io",
-	Version:  "v1alpha1",
+	Version:  "v1beta1",
 	Resource: "sandboxclaims",
 }
 
-const sandboxClaimAPIVersion = "extensions.agents.x-k8s.io/v1alpha1"
+const sandboxClaimAPIVersion = "extensions.agents.x-k8s.io/v1beta1"
 
 type SandboxClaim struct {
 	client              dynamic.NamespaceableResourceInterface
@@ -141,10 +141,9 @@ func (s *SandboxClaim) buildClaim(name, playwrightID string) *unstructured.Unstr
 			},
 		},
 		"spec": map[string]any{
-			"sandboxTemplateRef": map[string]any{
-				"name": s.templateName,
+			"warmPoolRef": map[string]any{
+				"name": s.warmPoolName,
 			},
-			"warmpool": s.warmPoolName,
 			"additionalPodMetadata": map[string]any{
 				"labels": map[string]any{
 					s.playwrightIDLabelKey: playwrightID,
