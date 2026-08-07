@@ -32,6 +32,10 @@ type Index struct {
 	// status.podIP.
 	client    kubernetes.Interface
 	namespace string
+
+	// diagnosedIPs tracks IPs we've already logged diagnostics for to avoid
+	// repeated warnings in the retry loop (podIP -> true).
+	diagnosedIPs sync.Map
 }
 
 // New creates an Index. `client` and `namespace` are stored eagerly so the
@@ -102,13 +106,31 @@ func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 		return "", false
 	}
 	if len(pods.Items) > 0 {
-		id := pods.Items[0].Labels[i.labelKey]
+		pod := pods.Items[0]
+		id := pod.Labels[i.labelKey]
 		if id == "" {
+			// Pod has the label key but empty value - log once and return failure
+			if _, alreadyLogged := i.diagnosedIPs.LoadOrStore(podIP, true); !alreadyLogged {
+				slog.Warn("identify: pod has empty label value",
+					"ip", podIP,
+					"pod", pod.Name,
+					"namespace", pod.Namespace,
+					"label_key", i.labelKey,
+					"hint", "set non-empty value for label")
+			}
 			return "", false
 		}
-		slog.Info("identify: API fallback resolved pod", "ip", podIP, "id", id, "pod", pods.Items[0].Name)
+		slog.Info("identify: API fallback resolved pod", "ip", podIP, "id", id, "pod", pod.Name)
 		return id, true
 	}
+
+	// Check if we've already diagnosed this IP to avoid repeated logging in retry loop
+	if _, alreadyDiagnosed := i.diagnosedIPs.Load(podIP); alreadyDiagnosed {
+		return "", false
+	}
+
+	// Mark as diagnosed before performing diagnostic checks
+	i.diagnosedIPs.Store(podIP, true)
 
 	// No labeled pod found - check if any pod exists with this IP (without label filter)
 	allPods, err := i.client.CoreV1().Pods(i.namespace).List(ctx, metav1.ListOptions{
