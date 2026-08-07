@@ -91,6 +91,8 @@ func (i *Index) lookupCache(podIP string) (string, bool) {
 func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
+	// First try with label selector - the expected case
 	pods, err := i.client.CoreV1().Pods(i.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: i.labelKey,
 		FieldSelector: "status.podIP=" + podIP,
@@ -99,16 +101,39 @@ func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 		slog.Warn("identify: API fallback list error", "ip", podIP, "err", err)
 		return "", false
 	}
-	if len(pods.Items) == 0 {
-		slog.Info("identify: API fallback no pod for IP", "ip", podIP)
+	if len(pods.Items) > 0 {
+		id := pods.Items[0].Labels[i.labelKey]
+		if id == "" {
+			return "", false
+		}
+		slog.Info("identify: API fallback resolved pod", "ip", podIP, "id", id, "pod", pods.Items[0].Name)
+		return id, true
+	}
+
+	// No labeled pod found - check if any pod exists with this IP (without label filter)
+	allPods, err := i.client.CoreV1().Pods(i.namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "status.podIP=" + podIP,
+	})
+	if err != nil {
+		slog.Warn("identify: API fallback list error (unlabeled check)", "ip", podIP, "err", err)
 		return "", false
 	}
-	id := pods.Items[0].Labels[i.labelKey]
-	if id == "" {
+
+	if len(allPods.Items) > 0 {
+		// Pod exists but lacks required label
+		pod := allPods.Items[0]
+		slog.Warn("identify: pod missing required label",
+			"ip", podIP,
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"label_key", i.labelKey,
+			"hint", "add label to pod template spec")
 		return "", false
 	}
-	slog.Info("identify: API fallback resolved pod", "ip", podIP, "id", id, "pod", pods.Items[0].Name)
-	return id, true
+
+	// No pod with this IP exists at all
+	slog.Info("identify: no pod found for IP", "ip", podIP, "namespace", i.namespace)
+	return "", false
 }
 
 // Ready returns true once the pod informer has done its initial LIST and the
