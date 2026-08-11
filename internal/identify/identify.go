@@ -19,6 +19,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+const diagnosticTTL = 10 * time.Minute
+
 type Index struct {
 	labelKey string
 
@@ -33,9 +35,10 @@ type Index struct {
 	client    kubernetes.Interface
 	namespace string
 
-	// diagnosedIPs tracks IPs we've already logged diagnostics for to avoid
-	// repeated warnings in the retry loop (podIP -> true).
-	diagnosedIPs sync.Map
+	// diagnosedIPs suppresses repeated diagnostics during the lookup retry
+	// loop. Entries expire so unique unresolved IPs are not retained forever.
+	diagnosedMu  sync.Mutex
+	diagnosedIPs map[string]time.Time
 }
 
 // New creates an Index. `client` and `namespace` are stored eagerly so the
@@ -43,10 +46,11 @@ type Index struct {
 // synced (e.g., the very first request after proxy startup).
 func New(labelKey string, client kubernetes.Interface, namespace string) *Index {
 	return &Index{
-		labelKey:  labelKey,
-		byPodIP:   map[string]string{},
-		client:    client,
-		namespace: namespace,
+		labelKey:     labelKey,
+		byPodIP:      map[string]string{},
+		client:       client,
+		namespace:    namespace,
+		diagnosedIPs: map[string]time.Time{},
 	}
 }
 
@@ -109,8 +113,7 @@ func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 		pod := pods.Items[0]
 		id := pod.Labels[i.labelKey]
 		if id == "" {
-			// Pod has the label key but empty value - log once and return failure
-			if _, alreadyLogged := i.diagnosedIPs.LoadOrStore(podIP, true); !alreadyLogged {
+			if i.claimDiagnostic(podIP) {
 				slog.Warn("identify: pod has empty label value",
 					"ip", podIP,
 					"pod", pod.Name,
@@ -124,25 +127,23 @@ func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 		return id, true
 	}
 
-	// Check if we've already diagnosed this IP to avoid repeated logging in retry loop
-	if _, alreadyDiagnosed := i.diagnosedIPs.Load(podIP); alreadyDiagnosed {
+	// Claim the diagnostic lookup atomically so concurrent retries cannot run
+	// the same unlabelled List or emit duplicate diagnostics.
+	if !i.claimDiagnostic(podIP) {
 		return "", false
 	}
-
-	// Mark as diagnosed before performing diagnostic checks
-	i.diagnosedIPs.Store(podIP, true)
 
 	// No labeled pod found - check if any pod exists with this IP (without label filter)
 	allPods, err := i.client.CoreV1().Pods(i.namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: "status.podIP=" + podIP,
 	})
 	if err != nil {
+		i.releaseDiagnostic(podIP)
 		slog.Warn("identify: API fallback list error (unlabeled check)", "ip", podIP, "err", err)
 		return "", false
 	}
 
 	if len(allPods.Items) > 0 {
-		// Pod exists but lacks required label
 		pod := allPods.Items[0]
 		slog.Warn("identify: pod missing required label",
 			"ip", podIP,
@@ -153,9 +154,39 @@ func (i *Index) lookupViaAPI(podIP string) (string, bool) {
 		return "", false
 	}
 
-	// No pod with this IP exists at all
 	slog.Info("identify: no pod found for IP", "ip", podIP, "namespace", i.namespace)
 	return "", false
+}
+
+func (i *Index) claimDiagnostic(podIP string) bool {
+	now := time.Now()
+	expiresAt := now.Add(diagnosticTTL)
+
+	i.diagnosedMu.Lock()
+	if existingExpiry, ok := i.diagnosedIPs[podIP]; ok && existingExpiry.After(now) {
+		i.diagnosedMu.Unlock()
+		return false
+	}
+	if i.diagnosedIPs == nil {
+		i.diagnosedIPs = make(map[string]time.Time)
+	}
+	i.diagnosedIPs[podIP] = expiresAt
+	i.diagnosedMu.Unlock()
+
+	time.AfterFunc(diagnosticTTL, func() {
+		i.diagnosedMu.Lock()
+		if currentExpiry, ok := i.diagnosedIPs[podIP]; ok && currentExpiry.Equal(expiresAt) {
+			delete(i.diagnosedIPs, podIP)
+		}
+		i.diagnosedMu.Unlock()
+	})
+	return true
+}
+
+func (i *Index) releaseDiagnostic(podIP string) {
+	i.diagnosedMu.Lock()
+	delete(i.diagnosedIPs, podIP)
+	i.diagnosedMu.Unlock()
 }
 
 // Ready returns true once the pod informer has done its initial LIST and the
