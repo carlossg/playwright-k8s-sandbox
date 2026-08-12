@@ -26,7 +26,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 CLUSTER="${CLUSTER:-playwright-proxy}"
 NAMESPACE="${NAMESPACE:-pw-test}"
-AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.4.6}"
+AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.4}"
 PROXY_IMAGE="${PROXY_IMAGE:-playwright-proxy:dev}"
 
 # ── kars-specific variables ────────────────────────────────────────────────────
@@ -70,8 +70,12 @@ cmd_up() {
   kubectl config use-context "kind-$CLUSTER" >/dev/null
 
   log "installing agent-sandbox $AGENT_SANDBOX_VERSION"
-  kubectl apply --server-side=true -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/manifest.yaml"
-  kubectl apply --server-side=true -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/extensions.yaml"
+  # v0.5.4 renamed the core release asset from manifest.yaml to sandbox.yaml
+  # (extensions.yaml, carrying the sandboxclaim/template/warmpool CRDs, kept its
+  # name). sandbox-with-extensions.yaml bundles both.
+  local base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
+  kubectl apply --server-side=true -f "$base/sandbox.yaml"
+  kubectl apply --server-side=true -f "$base/extensions.yaml"
   kubectl -n agent-sandbox-system rollout status deploy --timeout=180s
 
   log "building proxy image $PROXY_IMAGE"
@@ -93,14 +97,114 @@ cmd_up() {
 deploy_proxy() {
   local warmpool="$1"
   local sandbox_port="${2:-8080}"
-  sed -e "s|namespace: NAMESPACE|namespace: $NAMESPACE|g" \
-      -e "s|ghcr.io/carlossg/playwright-k8s-sandbox/proxy:latest|$PROXY_IMAGE|g" \
+  local mcp_port="${3:-}"   # when set, dual-protocol: proxy dials this for plain HTTP/MCP
+  local rendered
+  rendered=$(sed \
+      -e "s|namespace: NAMESPACE|namespace: $NAMESPACE|g" \
+      -e "s|image: ghcr.io/carlossg/playwright-k8s-sandbox:latest|image: $PROXY_IMAGE|g" \
       -e "s|value: \"playwright\"        # agent-sandbox SandboxWarmPool name|value: \"$warmpool\"|g" \
-      -e "s|value: \"9222\"              # Playwright server / MCP port|value: \"$sandbox_port\"|g" \
+      -e "s|value: \"9222\"|value: \"$sandbox_port\"|" \
       -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|" \
-      "$ROOT/deploy/proxy.yaml" | kubectl apply -f -
+      "$ROOT/deploy/proxy.yaml")
+  # Uncomment + set SANDBOX_MCP_PORT so the proxy routes plain HTTP (MCP) to the
+  # sandbox's second port while WS upgrades still go to SANDBOX_PORT.
+  if [ -n "$mcp_port" ]; then
+    rendered=$(printf '%s\n' "$rendered" \
+      | sed -e "s|# - name: SANDBOX_MCP_PORT|- name: SANDBOX_MCP_PORT|" \
+            -e "s|#   value: \"9223\"|  value: \"$mcp_port\"|")
+  fi
+  printf '%s\n' "$rendered" | kubectl apply -f -
   kubectl -n "$NAMESPACE" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" rollout status  deploy/playwright-proxy --timeout=120s
+
+  # `rollout status` returns as soon as the new pod is Ready, but the old
+  # (terminating) pod may still be draining and its Service EndpointSlice entry
+  # not yet reaped. A client that connects in that window has its SYN routed to
+  # the dead pod and dropped (ETIMEDOUT). Actively wait until exactly one proxy
+  # pod remains and the EndpointSlice addresses match its IP before returning,
+  # so callers never launch client Jobs against a half-settled Service.
+  wait_for_proxy_endpoints_settled
+}
+
+# Poll until the playwright-proxy Service's ready endpoints are exactly the set
+# of Running (non-terminating) proxy pod IPs. Fails loudly on timeout.
+# go-templates are used (not jsonpath) so absent fields like deletionTimestamp
+# degrade gracefully, and the pipelines end in sort|tr so they never return
+# non-zero under `set -euo pipefail` even when the set is momentarily empty.
+wait_for_proxy_endpoints_settled() {
+  local sel="app.kubernetes.io/name=playwright-proxy"
+  local live_ips ep_ips
+  for _ in $(seq 1 60); do
+    # IPs of proxy pods that are Running and not terminating.
+    live_ips=$(kubectl -n "$NAMESPACE" get pods -l "$sel" -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{if eq .status.phase "Running"}}{{.status.podIP}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null | sort | tr '\n' ',' || true)
+    # Ready endpoint addresses from the Service's EndpointSlices.
+    ep_ips=$(kubectl -n "$NAMESPACE" get endpointslices -l "kubernetes.io/service-name=playwright-proxy" -o go-template='{{range .items}}{{range .endpoints}}{{if .conditions.ready}}{{range .addresses}}{{.}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | sort | tr '\n' ',' || true)
+    if [ -n "$live_ips" ] && [ "$live_ips" = "$ep_ips" ]; then
+      log "proxy endpoints settled ($ep_ips)"
+      probe_proxy_dataplane_reachability
+      return 0
+    fi
+    sleep 1
+  done
+  kubectl -n "$NAMESPACE" get pods -l "$sel" -o wide || true
+  kubectl -n "$NAMESPACE" get endpointslices -l "kubernetes.io/service-name=playwright-proxy" -o wide || true
+  fail "proxy Service endpoints never settled after rollout"
+}
+
+# probe_proxy_dataplane_reachability is a best-effort DIAGNOSTIC that tries to
+# TCP-connect to the Service ClusterIP:9000 from inside the cluster. The
+# EndpointSlice match above is a control-plane signal only: kube-proxy still has
+# to program the node's iptables/ipvs rules before ClusterIP:9000 forwards to the
+# new pod. Measurement on kind shows that reprogramming completes in ~2s (a
+# single dropped SYN during a rollout), so this is a fast sanity check, not a
+# hard barrier.
+#
+# It is deliberately NON-FATAL. A raw TCP connect from a warm pod recovers within
+# ~2s of a rollout, and fresh probe pods connect in well under a second — but a
+# throwaway `kubectl run --rm -i` probe is an unreliable *reporter* of that
+# fact: in the harness's non-interactive, piped stdout context the attach can
+# miss the child's first stdout line, so a healthy dataplane can read as a false
+# negative. Aborting the whole run on that would be wrong. The real resilience
+# lives in the client Jobs, which retry ETIMEDOUT/ECONNRESET/1006 for their full
+# connect budget ("a real client tolerates a bouncing proxy; the test must
+# too"). So we probe, log the result for diagnostics, and always return success.
+#
+# The probe is a raw TCP connect, not an HTTP request, on purpose: a completed
+# handshake proves kube-proxy DNAT'd the SYN to a live backend, and it sidesteps
+# the proxy's Identify.Lookup fallback (a rate-limited API-server List for an
+# unidentified probe pod that can take many seconds to return 403), which would
+# make an HTTP probe read as a timeout even on a perfectly healthy dataplane.
+probe_proxy_dataplane_reachability() {
+  local probe="pw-dataplane-probe"
+  kubectl -n "$NAMESPACE" delete pod "$probe" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  log "probing proxy dataplane reachability (TCP connect to Service ClusterIP:9000; advisory)"
+  if kubectl -n "$NAMESPACE" run "$probe" --rm -i --restart=Never \
+      --image="$PLAYWRIGHT_IMAGE" --image-pull-policy=Never --command -- \
+      node -e '
+        const net = require("net");
+        const deadline = Date.now() + 30000;
+        function retry() {
+          if (Date.now() < deadline) { setTimeout(tryOnce, 1000); }
+          else { console.log("UNREACHABLE"); process.exit(1); }
+        }
+        function tryOnce() {
+          let settled = false;
+          const s = net.connect({ host: "playwright-proxy", port: 9000 });
+          s.setTimeout(5000);
+          const giveUp = () => { if (settled) return; settled = true; s.destroy(); retry(); };
+          s.on("connect", () => { if (settled) return; settled = true; console.log("REACHABLE tcp"); s.destroy(); process.exit(0); });
+          s.on("timeout", giveUp);
+          s.on("error", giveUp);
+        }
+        // Delay the first attempt so `kubectl run -i` has attached our stdout
+        // before a fast success prints REACHABLE (else the line is lost).
+        setTimeout(tryOnce, 1500);
+      ' 2>/dev/null | grep -q REACHABLE; then
+    log "proxy dataplane reachable ✓"
+  else
+    log "WARN: dataplane probe did not confirm ClusterIP:9000 reachability (advisory only; clients retry transient connect errors) — proceeding"
+  fi
+  return 0
 }
 
 # Apply the echo SandboxTemplate + WarmPool under the given name. The proxy will
@@ -197,7 +301,7 @@ cmd_test() {
   esac
 }
 
-PLAYWRIGHT_IMAGE="${PLAYWRIGHT_IMAGE:-localhost:5001/playwright-substrate:slim-1.49.1}"
+PLAYWRIGHT_IMAGE="${PLAYWRIGHT_IMAGE:-localhost:5001/playwright-substrate:slim-1.53.0}"
 
 # Apply the real Playwright SandboxTemplate + WarmPool + scripts ConfigMap.
 apply_playwright_pool() {
@@ -212,6 +316,21 @@ apply_playwright_pool() {
   for _ in $(seq 1 180); do
     ready=$(kubectl -n "$NAMESPACE" get sandboxwarmpool "$name" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
     [ "${ready:-0}" -ge 1 ] && return 0
+    # Actively surface a crashing sandbox instead of silently waiting out the
+    # full timeout: a two-process server.js (WS + MCP) that fails to launch
+    # shows up as CrashLoopBackOff/Error/RunContainerError. Bail immediately
+    # with the container logs so the failure reason is front-and-centre.
+    local bad
+    bad=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name="$name" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].state.waiting.reason}{" "}{.status.containerStatuses[*].state.terminated.reason}{"\n"}{end}' 2>/dev/null \
+      | grep -E 'CrashLoopBackOff|RunContainerError|Error|ImagePullBackOff|ErrImagePull|CreateContainerError' | head -1 || true)
+    if [ -n "$bad" ]; then
+      local bad_pod; bad_pod=$(printf '%s' "$bad" | awk '{print $1}')
+      log "sandbox pod '$bad_pod' is failing: $bad"
+      kubectl -n "$NAMESPACE" logs "$bad_pod" --tail=40 2>&1 | sed 's/^/    [crash] /' || true
+      kubectl -n "$NAMESPACE" logs "$bad_pod" --previous --tail=40 2>&1 | sed 's/^/    [crash prev] /' || true
+      fail "Playwright sandbox pod '$bad_pod' failed to launch ($bad)"
+    fi
     sleep 2
   done
   kubectl -n "$NAMESPACE" get pods -o wide
@@ -225,6 +344,15 @@ apply_playwright_client() {
   kubectl -n "$NAMESPACE" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
   sed -e "s/NAMESPACE/$NAMESPACE/g" -e "s/CLIENTID/$id/g" \
     "$HERE/playwright-client-job.yaml" | kubectl apply -f -
+}
+
+# MCP-over-HTTP counterpart of apply_playwright_client: drives the sandbox
+# through the proxy's plain-HTTP path (routed to SANDBOX_MCP_PORT).
+apply_playwright_mcp_client() {
+  local id="$1"
+  kubectl -n "$NAMESPACE" delete job "playwright-mcp-e2e-$id" --ignore-not-found --wait=true >/dev/null
+  sed -e "s/NAMESPACE/$NAMESPACE/g" -e "s/CLIENTID/$id/g" \
+    "$HERE/playwright-mcp-client-job.yaml" | kubectl apply -f -
 }
 
 wait_for_job_success() {
@@ -248,6 +376,15 @@ wait_for_job_success() {
 cmd_e2e() {
   log "real Playwright e2e against backend=sandboxclaim"
 
+  # The proxy's Ensure is Get-first and never recreates an existing claim, so a
+  # claim left behind by a previous (possibly buggy) proxy build — e.g. one that
+  # stamped an unqualified additionalPodMetadata label and is now stuck
+  # Ready=False/InvalidMetadata — would be reused verbatim and silently block the
+  # run. Delete stale managed claims up front so every e2e starts from scratch.
+  log "clearing stale proxy-managed SandboxClaims"
+  kubectl -n "$NAMESPACE" delete sandboxclaim \
+    -l playwright-proxy/managed=true --ignore-not-found --wait=true >/dev/null 2>&1 || true
+
   log "deploying in-cluster fetch target (traefik/whoami)"
   sed "s/NAMESPACE/$NAMESPACE/g" "$HERE/test-target.yaml" | kubectl apply -f -
   kubectl -n "$NAMESPACE" rollout status deploy/test-target --timeout=60s
@@ -268,18 +405,21 @@ cmd_e2e() {
 
   local pool="playwright"
   apply_playwright_pool "$pool"
-  deploy_proxy "$pool" 9222
+  # Dual-protocol: WS on 9222, MCP-over-HTTP on 9223. The proxy routes WS
+  # upgrades to 9222 and plain HTTP (MCP) to 9223.
+  deploy_proxy "$pool" 9222 9223
 
+  # ── WebSocket protocol (native Playwright) ─────────────────────────────────
   apply_playwright_client "alpha"
   apply_playwright_client "beta"
 
-  log "waiting for client Jobs (Playwright handshake + page nav)"
+  log "waiting for WS client Jobs (Playwright handshake + page nav)"
   wait_for_job_success "playwright-e2e-alpha"
   wait_for_job_success "playwright-e2e-beta"
 
-  log "client logs:"
-  kubectl -n "$NAMESPACE" logs job/playwright-e2e-alpha | sed 's/^/    [alpha] /'
-  kubectl -n "$NAMESPACE" logs job/playwright-e2e-beta  | sed 's/^/    [beta]  /'
+  log "WS client logs:"
+  kubectl -n "$NAMESPACE" logs job/playwright-e2e-alpha | sed 's/^/    [ws alpha] /'
+  kubectl -n "$NAMESPACE" logs job/playwright-e2e-beta  | sed 's/^/    [ws beta]  /'
 
   assert_sandboxclaim_exists alpha
   assert_sandboxclaim_exists beta
@@ -290,8 +430,28 @@ cmd_e2e() {
   [ -n "$sb_a" ] && [ -n "$sb_b" ] || fail "claim status missing sandbox.name"
   [ "$sb_a" != "$sb_b" ]            || fail "alpha and beta share a sandbox: $sb_a"
   log "pw-alpha → $sb_a ; pw-beta → $sb_b  (distinct ✓)"
+  log "WebSocket protocol PASSED"
 
-  log "Playwright e2e PASSED"
+  # ── MCP-over-HTTP protocol (@playwright/mcp) ───────────────────────────────
+  # gamma exercises the proxy's plain-HTTP path (routed to the sandbox's MCP
+  # port) via the MCP streamable-HTTP transport, proving two-port routing.
+  apply_playwright_mcp_client "gamma"
+
+  log "waiting for MCP client Job (MCP handshake + browser_navigate)"
+  wait_for_job_success "playwright-mcp-e2e-gamma"
+
+  log "MCP client log:"
+  kubectl -n "$NAMESPACE" logs job/playwright-mcp-e2e-gamma | sed 's/^/    [mcp gamma] /'
+
+  assert_sandboxclaim_exists gamma
+  local sb_g
+  sb_g=$(kubectl -n "$NAMESPACE" get sandboxclaim pw-gamma -o jsonpath='{.status.sandbox.name}' 2>/dev/null || true)
+  [ -n "$sb_g" ] || fail "claim status missing sandbox.name for gamma"
+  [ "$sb_g" != "$sb_a" ] && [ "$sb_g" != "$sb_b" ] || fail "gamma shares a sandbox with a WS client: $sb_g"
+  log "pw-gamma → $sb_g  (MCP, distinct from WS sandboxes ✓)"
+  log "MCP-over-HTTP protocol PASSED"
+
+  log "Playwright e2e PASSED (WebSocket + MCP-over-HTTP)"
 }
 
 # ── kars backend ──────────────────────────────────────────────────────────────
@@ -805,13 +965,13 @@ cmd_test_substrate() {
       log "building custom Playwright image (server.js baked in, --single-process)"
       cp "$HERE/playwright-substrate-server.js" "$HERE/server.js"
       docker build --platform "linux/$(go env GOARCH)" \
-        -t localhost:5001/playwright-substrate:slim-1.49.1 \
+        -t localhost:5001/playwright-substrate:slim-1.53.0 \
         -f "$HERE/playwright-substrate.Dockerfile" "$HERE" >/dev/null
       rm -f "$HERE/server.js"
       log "pushing to local registry that substrate's atelet reads from"
-      docker push localhost:5001/playwright-substrate:slim-1.49.1 >/dev/null
+      docker push localhost:5001/playwright-substrate:slim-1.53.0 >/dev/null
       local pw_digest
-      pw_digest=$(docker inspect localhost:5001/playwright-substrate:slim-1.49.1 --format '{{index .RepoDigests 0}}')
+      pw_digest=$(docker inspect localhost:5001/playwright-substrate:slim-1.53.0 --format '{{index .RepoDigests 0}}')
       log "image: $pw_digest"
       sed -e "s|NAMESPACE|$SUBSTRATE_NS|g" \
           -e "s|NAME|$SUBSTRATE_TEMPLATE_NAME|g" \
