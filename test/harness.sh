@@ -70,9 +70,16 @@ cmd_up() {
   kubectl config use-context "kind-$CLUSTER" >/dev/null
 
   log "installing agent-sandbox $AGENT_SANDBOX_VERSION"
-  # v0.5.4 renamed the core release asset from manifest.yaml to sandbox.yaml
+  # v0.5.2 renamed the core release asset from manifest.yaml to sandbox.yaml
   # (extensions.yaml, carrying the sandboxclaim/template/warmpool CRDs, kept its
-  # name). sandbox-with-extensions.yaml bundles both.
+  # name). v0.5.1 and earlier ship manifest.yaml, so an older override would 404
+  # on the sandbox.yaml apply below — reject it up front with a clear message.
+  # Encode vMAJOR.MINOR.PATCH as a comparable integer (dots -> printf args).
+  local ver_bare="${AGENT_SANDBOX_VERSION#v}"
+  local ver_num; ver_num=$(printf '%d%03d%03d' ${ver_bare//./ } 2>/dev/null) || ver_num=0
+  if [ "${ver_num:-0}" -lt 5002 ]; then
+    fail "AGENT_SANDBOX_VERSION must be >= v0.5.2 (got $AGENT_SANDBOX_VERSION): older releases ship manifest.yaml, not sandbox.yaml"
+  fi
   local base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
   kubectl apply --server-side=true -f "$base/sandbox.yaml"
   kubectl apply --server-side=true -f "$base/extensions.yaml"
@@ -112,6 +119,13 @@ deploy_proxy() {
     rendered=$(printf '%s\n' "$rendered" \
       | sed -e "s|# - name: SANDBOX_MCP_PORT|- name: SANDBOX_MCP_PORT|" \
             -e "s|#   value: \"9223\"|  value: \"$mcp_port\"|")
+    # Fail loudly if the substitution didn't land (e.g. deploy/proxy.yaml drifted
+    # away from the commented-out placeholder): a silently un-rendered manifest
+    # would leave the proxy single-port and the MCP leg would fail confusingly.
+    printf '%s\n' "$rendered" | grep -qE '^\s*- name: SANDBOX_MCP_PORT\s*$' \
+      || fail "SANDBOX_MCP_PORT env name not active in rendered proxy manifest"
+    printf '%s\n' "$rendered" | grep -qE "^\s*value: \"$mcp_port\"\s*$" \
+      || fail "SANDBOX_MCP_PORT value \"$mcp_port\" missing from rendered proxy manifest"
   fi
   printf '%s\n' "$rendered" | kubectl apply -f -
   kubectl -n "$NAMESPACE" rollout restart deploy/playwright-proxy >/dev/null 2>&1 || true
@@ -178,7 +192,12 @@ probe_proxy_dataplane_reachability() {
   local probe="pw-dataplane-probe"
   kubectl -n "$NAMESPACE" delete pod "$probe" --ignore-not-found --wait=true >/dev/null 2>&1 || true
   log "probing proxy dataplane reachability (TCP connect to Service ClusterIP:9000; advisory)"
+  # Cap the wait for the probe pod to start. deploy_proxy also runs for the
+  # echo-pool tests, where $PLAYWRIGHT_IMAGE may not be loaded into the cluster;
+  # with --image-pull-policy=Never that pod never starts, and `kubectl run -i`
+  # would otherwise block for the default 60s before reaching the WARN branch.
   if kubectl -n "$NAMESPACE" run "$probe" --rm -i --restart=Never \
+      --pod-running-timeout=20s \
       --image="$PLAYWRIGHT_IMAGE" --image-pull-policy=Never --command -- \
       node -e '
         const net = require("net");
@@ -343,6 +362,7 @@ apply_playwright_client() {
   # Allow re-running the e2e command: drop any prior Job + pods for this id.
   kubectl -n "$NAMESPACE" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
   sed -e "s/NAMESPACE/$NAMESPACE/g" -e "s/CLIENTID/$id/g" \
+    -e "s|image: PLAYWRIGHT_IMAGE|image: $PLAYWRIGHT_IMAGE|" \
     "$HERE/playwright-client-job.yaml" | kubectl apply -f -
 }
 
@@ -352,6 +372,7 @@ apply_playwright_mcp_client() {
   local id="$1"
   kubectl -n "$NAMESPACE" delete job "playwright-mcp-e2e-$id" --ignore-not-found --wait=true >/dev/null
   sed -e "s/NAMESPACE/$NAMESPACE/g" -e "s/CLIENTID/$id/g" \
+    -e "s|image: PLAYWRIGHT_IMAGE|image: $PLAYWRIGHT_IMAGE|" \
     "$HERE/playwright-mcp-client-job.yaml" | kubectl apply -f -
 }
 

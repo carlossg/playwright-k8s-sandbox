@@ -23,7 +23,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: client
-          image: localhost:5001/playwright-substrate:slim-1.53.0
+          image: PLAYWRIGHT_IMAGE
           imagePullPolicy: Never
           command: ["node", "/scripts/mcp-client.js"]
           env:
