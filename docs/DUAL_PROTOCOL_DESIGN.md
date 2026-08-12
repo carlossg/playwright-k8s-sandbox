@@ -1,7 +1,9 @@
 # Dual-protocol sandbox serving (MCP over HTTP + native Playwright WS) — design notes
 
-**Status:** Proxy side implemented (two-port routing). Sandbox image + e2e tests
-still to do.
+**Status:** Implemented end-to-end for the `sandboxclaim` backend. The proxy
+routes both protocols (two-port model), the shared slim sandbox image serves
+both (native Playwright WS via `chromium.launchServer` + MCP-over-HTTP via
+`@playwright/mcp`), and `harness.sh e2e` drives and asserts both.
 
 Since `@playwright/mcp` cannot share a process/port with `chromium.launchServer`
 (see [Research conclusion](#research-conclusion)), we chose the **two-port** model
@@ -23,57 +25,59 @@ single routing decision.
 - Only the `sandboxclaim` backend populates `MCPPort` today (in scope);
   substrate/isola/kars leave it 0 and behave exactly as before.
 
-**Still to do (not yet implemented, not blocking):** make the sandbox test image
-actually serve MCP on the second port (run `@playwright/mcp` alongside
-`chromium.launchServer`), and add the e2e MCP client test. See
-[Implementation sketch](#implementation-sketch-deferred) — adapted below: with the
-two-port model there is **no in-container dispatcher**; the image just runs both
-servers on their own ports.
+**Implemented (sandbox image + e2e, test-only):**
+
+- `test/playwright-substrate-server.js` launches `chromium.launchServer` on `PORT`
+  and, when `MCP_PORT` is set, spawns `@playwright/mcp` on that port (see
+  [As implemented](#as-implemented)).
+- `test/playwright-scripts.yaml` gains `mcp-client.js`, and
+  `test/playwright-mcp-client-job.yaml` runs it; `harness.sh cmd_e2e` drives WS
+  (alpha, beta) and MCP (gamma) legs and asserts all three land on distinct
+  sandboxes.
 
 - [Motivation](#motivation)
 - [Current state](#current-state)
 - [Research conclusion](#research-conclusion)
-- [Proposed architecture](#proposed-architecture)
+- [Chosen architecture: two ports](#chosen-architecture-two-ports)
+- [Alternative considered (not chosen): in-container front dispatcher](#alternative-considered-not-chosen-in-container-front-dispatcher)
 - [Why not a single process/listener](#why-not-a-single-processlistener)
-- [Implementation sketch (deferred)](#implementation-sketch-deferred)
+- [As implemented](#as-implemented)
 - [Out of scope](#out-of-scope)
-- [Open questions / risks](#open-questions--risks)
+- [Notes / resolved risks](#notes--resolved-risks)
 
 ## Motivation
 
-`config.SandboxPort` (`internal/config/config.go`) is documented as "the TCP port
-on the sandbox pod that serves Playwright (MCP HTTP or WS)". `backend.Endpoint`
-and every backend implementation resolve a client to a single `Host:Port`,
-independent of protocol. The contract is therefore: **the sandbox container is
-expected to multiplex both the native Playwright WebSocket protocol and MCP over
-HTTP on one port**, the same way the proxy already multiplexes them on its own
-listen port.
+`config.SandboxPort` (`internal/config/config.go`) originally modelled a single
+`Host:Port` per client, on the assumption that the sandbox container multiplexes
+both the native Playwright WebSocket protocol and MCP over HTTP on one port — the
+same way the proxy multiplexes them on its own listen port.
 
-The test sandbox image does not honor this contract yet. It only runs
-`chromium.launchServer({ port, wsPath, ... })` (native WS). There is no MCP
-server anywhere in the image, so the MCP-over-HTTP half of the contract is
-untested and unserved.
+That assumption does not hold: `@playwright/mcp` cannot share a process or port
+with `chromium.launchServer` (see below). The sandbox therefore has to serve the
+two protocols on two ports, and the proxy has to learn which port to dial per
+protocol — which is what `SANDBOX_MCP_PORT` / `Endpoint.MCPPort` now provide.
 
 ## Current state
 
-**Proxy side (done, not in scope for this work):**
+**Proxy side:**
 
 - `internal/proxy/proxy.go` routes both protocols on its single listen port. It
   detects WS upgrades via the `Connection`/`Upgrade` headers (`isWebsocketUpgrade`)
-  and otherwise reverse-proxies plain HTTP (for MCP-over-HTTP / SSE), with
-  `FlushInterval: -1` for immediate streaming flush.
+  and reverse-proxies plain HTTP (for MCP-over-HTTP / SSE) with `FlushInterval: -1`
+  for immediate streaming flush. `handleWS` dials `Endpoint.Addr()` (WS port);
+  `handleHTTP` dials `Endpoint.MCPAddr()` (MCP port, falling back to the WS port).
 - Backend selection is by client pod IP → `playwright-id`
   (`internal/identify/identify.go`), independent of protocol.
 
-**Sandbox side (the gap):**
+**Sandbox side:**
 
-- `test/playwright-substrate-server.js` only calls `chromium.launchServer(...)`
-  (native WS). No MCP server.
-- `test/README-test-existing-proxy.md` lists "MCP/SSE Path (placeholder)" and
-  "--mcp-only ... not yet implemented".
-- `test/harness.sh` `cmd_e2e` (agent-sandbox path) only drives WS via
-  `test/playwright-client-job.yaml` + `test/playwright-scripts.yaml`'s
-  `client.js` (`chromium.connect(...)`).
+- `test/playwright-substrate-server.js` runs `chromium.launchServer(...)` on `PORT`
+  and, when `MCP_PORT` is set, also spawns `@playwright/mcp --port $MCP_PORT` as a
+  second listener. The two protocols live on two ports; the proxy picks between
+  them.
+- `test/harness.sh` `cmd_e2e` (agent-sandbox path) drives both: WS via
+  `test/playwright-client-job.yaml` + `client.js`, and MCP via
+  `test/playwright-mcp-client-job.yaml` + `mcp-client.js`.
 
 ## Research conclusion
 
@@ -94,26 +98,26 @@ this:
    exposes over WS. (It *can* attach to an external browser via `--cdp-endpoint`,
    but that is a different, heavier integration and unnecessary here.)
 
-**Therefore the path forward is a small in-container front dispatcher** that
-mirrors `proxy.go`'s own `isWebsocketUpgrade` dispatch one hop downstream: it
-listens on `SANDBOX_PORT`, and routes WS upgrades to `chromium.launchServer` and
-plain HTTP to `@playwright/mcp`, each on a private loopback port. This keeps "one
-port serves both" **true from the proxy's perspective** and requires **no Go code
-changes** — `config.SandboxPort` / `backend.Endpoint` already model exactly this.
+**Therefore the two protocols must be served on two ports.** We expose both ports
+directly and let the proxy route between them (WS upgrade → WS port, plain HTTP →
+MCP port). This keeps the proxy's existing `isWebsocketUpgrade` split as the single
+routing decision and needs no in-container dispatcher — the proxy already models
+"which port per protocol" via `Endpoint.Port` / `Endpoint.MCPAddr()`.
 
 ### Reference
 
 - `@playwright/mcp` HTTP transport: `npx @playwright/mcp@latest --port <port>`;
   MCP endpoint at `/mcp` (streamable-http), legacy SSE at `/sse` + `/messages`.
-- Relevant CLI flags: `--port`, `--host` (use `0.0.0.0` / here `127.0.0.1`),
-  `--headless`, `--browser`, `--isolated`, `--no-sandbox`, `--cdp-endpoint`.
+- Relevant CLI flags: `--port`, `--host` (use `0.0.0.0`), `--headless`,
+  `--browser` (pin to `chromium` — see [As implemented](#as-implemented)),
+  `--isolated`, `--no-sandbox`, `--cdp-endpoint`.
 - Source: <https://github.com/microsoft/playwright-mcp>,
   <https://www.npmjs.com/package/@playwright/mcp>.
 
 ## Chosen architecture: two ports
 
 The sandbox runs two independent servers on two ports; the proxy routes to the
-correct one per protocol (already implemented — see the Status section):
+correct one per protocol:
 
 ```
         ┌─ playwright-proxy ─┐
@@ -126,9 +130,7 @@ correct one per protocol (already implemented — see the Status section):
 ```
 
 No in-container dispatcher is required: each server owns its own port, and the
-proxy's existing `isWebsocketUpgrade` check is the only routing decision. The
-remaining work is to run `@playwright/mcp` in the sandbox image alongside
-`chromium.launchServer` and add the e2e MCP client test.
+proxy's existing `isWebsocketUpgrade` check is the only routing decision.
 
 ## Alternative considered (not chosen): in-container front dispatcher
 
@@ -155,14 +157,9 @@ A single container, three parts, one public port (9222):
   contains `upgrade` AND `Upgrade` equals `websocket`. WS path hijacks and
   TCP-splices to the internal WS port (same hijack + bidirectional `io.Copy`
   pattern as `proxy.go`'s `handleWS`). HTTP path pipes to the internal MCP port.
-- **`chromium.launchServer`** runs in-process on a loopback port (as today, but no
-  longer bound to `0.0.0.0:9222`).
-- **`@playwright/mcp`** runs as a spawned child process on a loopback port. Child
-  exit ⇒ `process.exit(1)` so the pod restarts (matches the current fail-fast
-  behaviour of `server.js`).
-- **Readiness:** the front dispatcher should only `listen()` once both children
-  report ready, so the existing `tcpSocket: {port: 9222}` probe stays meaningful;
-  an HTTP probe of `/mcp` is a stronger alternative.
+- Rejected because it duplicates the proxy's dispatch one hop downstream and grows
+  `server.js`, for no benefit over exposing a second port that the proxy already
+  knows how to dial.
 
 ## Why not a single process/listener
 
@@ -174,73 +171,72 @@ Considered and rejected:
 - **One `http.Server` hosting both via `createConnection` embed + a WS handler
   proxying to `launchServer`** — still needs `launchServer` on its own port, so
   you end up with the dispatcher anyway, plus more in-process coupling and a
-  larger `server.js`. The child-process + dispatcher shape is smaller and more
-  robust, and it directly mirrors the proxy's proven dispatch.
+  larger `server.js`.
 
-## Implementation sketch (deferred)
+## As implemented
 
-Recorded so the future implementer starts from the plan, not from scratch. **Do
-not implement without explicit prioritization.** Test-only; no Go changes.
+Test-only; no additional Go changes beyond the proxy two-port routing above.
 
-**(a) Image / dispatcher**
-- Rewrite `test/playwright-substrate-server.js` into the front dispatcher
-  described above (or add `playwright-sandbox-dispatch.js`; the harness bakes
-  exactly one `server.js`, so rewriting in place is simplest).
-- `test/playwright-substrate.Dockerfile`: add `@playwright/mcp` (and
-  `@modelcontextprotocol/sdk` for the client) to the global npm install. No extra
-  browser download — MCP reuses the installed chromium via
-  `PLAYWRIGHT_BROWSERS_PATH`.
+**(a) Image (`test/playwright-substrate.Dockerfile`)**
+- Global npm install pins `playwright` + `playwright-core` to **1.53.0** and adds
+  `@playwright/mcp@0.0.29` + `@modelcontextprotocol/sdk@1.30.0` (the SDK is also
+  used by the MCP client Job). `playwright-core` is installed at the global root
+  because `@playwright/mcp` is ESM and its `import 'playwright-core'` walks
+  `node_modules` from the package dir (ignoring `NODE_PATH`).
+- No extra browser download — MCP reuses the single installed Chromium via
+  `PLAYWRIGHT_BROWSERS_PATH`. Exposes `9222` (WS) and `9223` (MCP).
 
-**(b) MCP server config (following the `PORT` / `PW_WS_PATH` / `CHROMIUM_ARGS`
-env pattern)**
-- New env: `PW_WS_INTERNAL_PORT` (default 9223), `PW_MCP_INTERNAL_PORT`
-  (default 9224).
-- Spawn: `mcp-server --host 127.0.0.1 --port $PW_MCP_INTERNAL_PORT --headless
-  --isolated --no-sandbox` (map `CHROMIUM_ARGS` sandbox flags onto `--no-sandbox`).
-- `PORT` (9222), `PW_WS_PATH`, `CHROMIUM_ARGS` keep their current meaning; the
-  latter two still feed `chromium.launchServer`.
+**(b) Server (`test/playwright-substrate-server.js`)**
+- Always launches `chromium.launchServer` on `PORT`. When `MCP_PORT` is set, it
+  also spawns `@playwright/mcp --port $MCP_PORT --host 0.0.0.0 --headless
+  --isolated --no-sandbox --browser chromium`. `--browser chromium` is required:
+  `@playwright/mcp` defaults to the branded `chrome` channel
+  (`/opt/google/chrome/chrome`), which the slim image does not ship.
+- When `MCP_PORT` is unset the image is WS-only (unchanged for substrate/gVisor).
 
-**(c) Test manifests + client**
-- Add `mcp-client.js` to `test/playwright-scripts.yaml`. It uses
-  `@modelcontextprotocol/sdk` streamable-http client against
+**(c) Sandbox manifest (`test/playwright-sandboxtemplate.yaml`)**
+- `PORT=9222`, `MCP_PORT=9223`, both container ports exposed. Readiness gates on
+  the WS port (9222): `@playwright/mcp` binds its HTTP port immediately, whereas
+  `chromium.launchServer` binds only after launching the browser, so a ready WS
+  port implies the MCP port is already up.
+- `test/playwright-warmpool.yaml` replicas = 3 (WS alpha + WS beta + MCP gamma each
+  claim a distinct sandbox).
+
+**(d) MCP client (`mcp-client.js` in `test/playwright-scripts.yaml`,
+`test/playwright-mcp-client-job.yaml`)**
+- Uses `@modelcontextprotocol/sdk` streamable-http client against
   `http://playwright-proxy:9000/mcp` and drives a real action mirroring
-  `client.js`: `initialize` → `tools/list` → `browser_navigate` → snapshot →
-  assert the whoami `Hostname:` appears. Emit `BENCH {json}` for harness grep
-  parity; reuse the 403-cold-informer retry from `client.js`.
-- Parameterize `test/playwright-client-job.yaml` (sed tokens for script name +
-  `PW_URL`) so one manifest renders either the WS or the MCP client.
+  `client.js`: connect → `tools/list` → `browser_navigate` → assert the whoami
+  `Hostname:` appears in the snapshot. Emits `BENCH {json}` for harness grep
+  parity and reuses the transient-error retry from `client.js`.
+- `tools/list` is fetched with a **passthrough result schema**, not the strict
+  `client.listTools()`: `@playwright/mcp@0.0.29` emits `inputSchema` without the
+  mandatory `type: "object"`, which the SDK's strict Zod validation rejects with a
+  `ZodError`. `callTool` stays on the strict high-level API, so the actual tool
+  call + its result are still validated end-to-end through the proxy.
 
-**(d) `harness.sh`**
-- Extend `apply_playwright_client()` to take a script + URL.
-- In `cmd_e2e`, keep the WS assertions unchanged and add an MCP leg using a
-  distinct `playwright-id` (e.g. `alpha-mcp`) so it gets its own claim and the
-  isolation asserts extend naturally. Both legs run **through the proxy**.
-- Gate the MCP leg behind `--with-mcp` (or `E2E_MCP=1`) during bring-up so a
-  broken MCP path can't regress the WS flow; flip to default-on once green.
-
-**(e) Manual verification checklist**
-1. Image builds; `node -e "require('@playwright/mcp')"` succeeds.
-2. `@playwright/mcp` version is compatible with the pinned Playwright/chromium.
-3. `ss -ltnp` in the pod shows `:9222` (0.0.0.0) + two loopback ports.
-4. Existing WS `client.js` job still passes (no regression).
-5. `mcp-client.js` job passes through the proxy; proxy logs show the HTTP path
-   (not a WS upgrade) for the MCP client's pod IP.
-6. WS and MCP clients get distinct `sandboxclaim` `status.sandbox.name`.
-7. MCP responses stream without buffering stalls.
-8. Re-running `harness.sh e2e --with-mcp` is idempotent.
+**(e) `harness.sh`**
+- `deploy_proxy` takes an optional MCP port and uncomments `SANDBOX_MCP_PORT` in
+  the rendered `deploy/proxy.yaml`.
+- `cmd_e2e` clears stale managed claims, runs the WS legs (alpha, beta) then the
+  MCP leg (gamma) — each with a distinct `playwright-id` so it gets its own claim —
+  and asserts all three land on distinct `sandboxclaim` `status.sandbox.name`. Both
+  protocols run **through the proxy**. The MCP leg is default-on (no gate): it was
+  brought up green before landing.
 
 ## Out of scope
 
 - substrate, kars, and isola backends (dual-protocol comes to them later).
-- `test/test-existing-proxy.sh`'s `--mcp-only` placeholder (wire only if it drops
-  in trivially once `mcp-client.js` exists).
-- The immediate port-mismatch fix — handled by PR #788.
+- `test/test-existing-proxy.sh`'s `--mcp-only` placeholder.
 
-## Open questions / risks
+## Notes / resolved risks
 
-- **Version compatibility (main risk):** `@playwright/mcp` may require a newer
-  Playwright than the pinned `playwright@1.49.0`. Bumping the shared slim image
-  affects the substrate/kars/isola examples too (same image), so verify no
-  breakage there even though they're out of scope for *testing*.
-- **Whether to land the MCP e2e leg behind `--with-mcp` first (recommended) or
-  default-on.**
+- **Version compatibility (was the main risk):** `@playwright/mcp` needs a newer
+  Playwright than the previous `playwright@1.49.x`. Resolved by pinning the shared
+  slim image to `playwright@1.53.0` to match `@playwright/mcp@0.0.29`; both share
+  the single installed Chromium build. The shared image is also used by the
+  substrate/kars/isola examples — the WS path is unaffected by the bump.
+- **Newer `@playwright/mcp`:** 0.0.30/0.0.32 still emit the `type`-less
+  `inputSchema`; 0.0.40+ need an alpha Playwright, and 0.0.60+ add a host allow-list
+  that breaks proxying. 0.0.29 + the client-side passthrough schema is the least
+  invasive combination that keeps the WS path on stable `playwright@1.53.0`.
