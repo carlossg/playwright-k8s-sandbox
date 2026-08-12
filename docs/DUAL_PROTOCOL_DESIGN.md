@@ -1,12 +1,34 @@
 # Dual-protocol sandbox serving (MCP over HTTP + native Playwright WS) — design notes
 
-**Status:** Research / design only. Not implemented. Not currently prioritized.
+**Status:** Proxy side implemented (two-port routing). Sandbox image + e2e tests
+still to do.
 
-**Scope of this document:** the *sandbox pod* side of dual-protocol support for the
-agent-sandbox / `sandboxclaim` backend. The *proxy* side is already done (see
-[Current state](#current-state)). The immediate port-mismatch issue is handled
-separately by PR #788; this document exists so the "one sandbox port serves both
-protocols" enhancement can be picked up later without re-deriving the research.
+Since `@playwright/mcp` cannot share a process/port with `chromium.launchServer`
+(see [Research conclusion](#research-conclusion)), we chose the **two-port** model
+over an in-container front dispatcher: the sandbox serves the native WebSocket
+protocol on one port and MCP-over-HTTP on a second port, and the **proxy dials the
+correct one per protocol** (WS upgrades → WS port, plain HTTP → MCP port). This is
+simpler than a dispatcher — nothing new runs inside the container besides the
+second server — and keeps the proxy's existing `isWebsocketUpgrade` split as the
+single routing decision.
+
+**Implemented (proxy, Go):**
+
+- `backend.Endpoint` carries `Port` (WS) and `MCPPort` (MCP-over-HTTP); `MCPAddr()`
+  falls back to `Port` when `MCPPort == 0`, so single-port sandboxes and
+  Host-header-routed backends (substrate) are unchanged.
+- `internal/proxy/proxy.go` `handleHTTP` dials `Endpoint.MCPAddr()`; `handleWS`
+  still dials `Endpoint.Addr()`.
+- `config.SandboxMCPPort` (env `SANDBOX_MCP_PORT`, optional) + `deploy/proxy.yaml`.
+- Only the `sandboxclaim` backend populates `MCPPort` today (in scope);
+  substrate/isola/kars leave it 0 and behave exactly as before.
+
+**Still to do (not yet implemented, not blocking):** make the sandbox test image
+actually serve MCP on the second port (run `@playwright/mcp` alongside
+`chromium.launchServer`), and add the e2e MCP client test. See
+[Implementation sketch](#implementation-sketch-deferred) — adapted below: with the
+two-port model there is **no in-container dispatcher**; the image just runs both
+servers on their own ports.
 
 - [Motivation](#motivation)
 - [Current state](#current-state)
@@ -88,7 +110,31 @@ changes** — `config.SandboxPort` / `backend.Endpoint` already model exactly th
 - Source: <https://github.com/microsoft/playwright-mcp>,
   <https://www.npmjs.com/package/@playwright/mcp>.
 
-## Proposed architecture
+## Chosen architecture: two ports
+
+The sandbox runs two independent servers on two ports; the proxy routes to the
+correct one per protocol (already implemented — see the Status section):
+
+```
+        ┌─ playwright-proxy ─┐
+        │ isWebsocketUpgrade │
+   WS ──┤                    ├── plain HTTP (MCP)
+        ▼                    ▼
+  sandbox :PORT        sandbox :SANDBOX_MCP_PORT
+  chromium.launchServer   @playwright/mcp
+  (Endpoint.Addr)         (Endpoint.MCPAddr)
+```
+
+No in-container dispatcher is required: each server owns its own port, and the
+proxy's existing `isWebsocketUpgrade` check is the only routing decision. The
+remaining work is to run `@playwright/mcp` in the sandbox image alongside
+`chromium.launchServer` and add the e2e MCP client test.
+
+## Alternative considered (not chosen): in-container front dispatcher
+
+Before opting for two ports, a single-port design was considered where one public
+port is fronted by a small dispatcher that mirrors `proxy.go`. It was rejected as
+more complex than simply exposing a second port. Kept here for reference:
 
 A single container, three parts, one public port (9222):
 

@@ -34,8 +34,17 @@ type Config struct {
 	// name the template and pool identically).
 	TemplateName string
 
-	// SandboxPort is the TCP port on the sandbox pod that serves Playwright (MCP HTTP or WS).
+	// SandboxPort is the TCP port on the sandbox pod that serves the native
+	// Playwright WebSocket protocol (chromium.launchServer).
 	SandboxPort int
+
+	// SandboxMCPPort is the TCP port on the sandbox pod that serves MCP-over-HTTP.
+	// @playwright/mcp cannot share a process/port with chromium.launchServer, so a
+	// dual-protocol sandbox listens on two ports and the proxy dials this one for
+	// plain HTTP requests. When 0 (SANDBOX_MCP_PORT unset), the proxy falls back to
+	// SandboxPort, preserving single-port behaviour. Only applied by the
+	// sandboxclaim backend today.
+	SandboxMCPPort int
 
 	// SubstrateAPIEndpoint is the host:port of ate-api-server's gRPC service
 	// (substrate backend only). Typically "api.ate-system.svc.cluster.local:443".
@@ -123,6 +132,15 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("SANDBOX_PORT: %w", err)
 	}
 	c.SandboxPort = port
+
+	// SANDBOX_MCP_PORT is optional; 0 means "same as SANDBOX_PORT" (single-port sandbox).
+	if v := os.Getenv("SANDBOX_MCP_PORT"); v != "" {
+		mcpPort, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("SANDBOX_MCP_PORT: %w", err)
+		}
+		c.SandboxMCPPort = mcpPort
+	}
 
 	c.IdleTTL, err = time.ParseDuration(envOr("IDLE_TTL", "10m"))
 	if err != nil {

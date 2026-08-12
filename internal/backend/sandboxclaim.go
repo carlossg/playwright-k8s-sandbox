@@ -48,21 +48,23 @@ var sandboxClaimGVR = schema.GroupVersionResource{
 const sandboxClaimAPIVersion = "extensions.agents.x-k8s.io/v1beta1"
 
 type SandboxClaim struct {
-	client              dynamic.NamespaceableResourceInterface
-	namespace           string
-	templateName        string
-	warmPoolName        string
-	port                int
+	client               dynamic.NamespaceableResourceInterface
+	namespace            string
+	templateName         string
+	warmPoolName         string
+	port                 int // native Playwright WS port
+	mcpPort              int // MCP-over-HTTP port; 0 means same as port
 	playwrightIDLabelKey string
 }
 
-func NewSandboxClaim(dc dynamic.Interface, namespace, templateName, warmPoolName string, port int, labelKey string) *SandboxClaim {
+func NewSandboxClaim(dc dynamic.Interface, namespace, templateName, warmPoolName string, port, mcpPort int, labelKey string) *SandboxClaim {
 	return &SandboxClaim{
-		client:              dc.Resource(sandboxClaimGVR),
-		namespace:           namespace,
-		templateName:        templateName,
-		warmPoolName:        warmPoolName,
-		port:                port,
+		client:               dc.Resource(sandboxClaimGVR),
+		namespace:            namespace,
+		templateName:         templateName,
+		warmPoolName:         warmPoolName,
+		port:                 port,
+		mcpPort:              mcpPort,
 		playwrightIDLabelKey: labelKey,
 	}
 }
@@ -116,7 +118,7 @@ func (s *SandboxClaim) Ensure(ctx context.Context, playwrightID string) (Endpoin
 		if !ready {
 			return false, nil
 		}
-		ep = Endpoint{Host: ip, Port: s.port}
+		ep = Endpoint{Host: ip, Port: s.port, MCPPort: s.mcpPort}
 		return true, nil
 	})
 	if pollErr != nil {
@@ -158,7 +160,7 @@ func (s *SandboxClaim) buildClaim(name, playwrightID string) *unstructured.Unstr
 			"name":      name,
 			"namespace": s.namespace,
 			"labels": map[string]any{
-				managedByLabel:          "true",
+				managedByLabel:         "true",
 				s.playwrightIDLabelKey: playwrightID,
 			},
 		},

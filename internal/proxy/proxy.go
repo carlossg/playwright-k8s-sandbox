@@ -44,8 +44,8 @@ func New(sessions *session.Manager, idx *identify.Index, backendKind string, log
 		Backend:  backendKind,
 	}
 	h.httpProxy = &httputil.ReverseProxy{
-		Director:     func(*http.Request) {}, // we rewrite in ServeHTTP before calling
-		ErrorHandler: h.proxyError,
+		Director:      func(*http.Request) {}, // we rewrite in ServeHTTP before calling
+		ErrorHandler:  h.proxyError,
 		FlushInterval: -1, // immediate flush for streaming / SSE / MCP
 	}
 	return h
@@ -84,8 +84,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request, sess *session.Session) {
-	// Rewrite the request to point at the sandbox endpoint.
-	target := &url.URL{Scheme: "http", Host: sess.Endpoint.Addr()}
+	// Rewrite the request to point at the sandbox's MCP-over-HTTP endpoint.
+	// This is a distinct port from the WS endpoint (Endpoint.Addr) because
+	// @playwright/mcp cannot share a process/port with chromium.launchServer;
+	// MCPAddr falls back to the WS port for single-port sandboxes.
+	target := &url.URL{Scheme: "http", Host: sess.Endpoint.MCPAddr()}
 	r2 := r.Clone(r.Context())
 	r2.URL.Scheme = target.Scheme
 	r2.URL.Host = target.Host
