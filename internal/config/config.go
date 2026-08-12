@@ -127,19 +127,18 @@ func FromEnv() (*Config, error) {
 		}
 	}
 
-	port, err := strconv.Atoi(envOr("SANDBOX_PORT", "9222"))
+	var err error
+	c.SandboxPort, err = parsePort("SANDBOX_PORT", envOr("SANDBOX_PORT", "9222"), false)
 	if err != nil {
-		return nil, fmt.Errorf("SANDBOX_PORT: %w", err)
+		return nil, err
 	}
-	c.SandboxPort = port
 
 	// SANDBOX_MCP_PORT is optional; 0 means "same as SANDBOX_PORT" (single-port sandbox).
 	if v := os.Getenv("SANDBOX_MCP_PORT"); v != "" {
-		mcpPort, err := strconv.Atoi(v)
+		c.SandboxMCPPort, err = parsePort("SANDBOX_MCP_PORT", v, true)
 		if err != nil {
-			return nil, fmt.Errorf("SANDBOX_MCP_PORT: %w", err)
+			return nil, err
 		}
-		c.SandboxMCPPort = mcpPort
 	}
 
 	c.IdleTTL, err = time.ParseDuration(envOr("IDLE_TTL", "10m"))
@@ -188,6 +187,24 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("unknown BACKEND %q (want sandboxclaim, substrate, karssandbox, or isola)", c.Backend)
 	}
 	return c, nil
+}
+
+// parsePort parses a TCP port from raw and validates it. allowZero permits 0 as
+// a sentinel (SANDBOX_MCP_PORT uses 0 to mean "same port as SANDBOX_PORT");
+// otherwise the port must be in 1..65535 so the proxy never builds a Host:Port
+// that silently fails at dial time.
+func parsePort(name, raw string, allowZero bool) (int, error) {
+	p, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	if allowZero && p == 0 {
+		return 0, nil
+	}
+	if p < 1 || p > 65535 {
+		return 0, fmt.Errorf("%s: %d out of range 1..65535", name, p)
+	}
+	return p, nil
 }
 
 func envOr(k, dflt string) string {
