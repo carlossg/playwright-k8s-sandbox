@@ -37,7 +37,11 @@ data:
     // doesn't drop while the proxy is legitimately waiting on the actor.
     const CONNECT_TIMEOUT_MS = Number(process.env.PW_CONNECT_TIMEOUT_MS || '180000');
     const RETRYABLE = /403|Forbidden|not labelled|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|socket hang up|1006|WebSocket error/i;
-    async function connectWithRetry(url, deadlineMs = 60000) {
+    // Derive the retry budget from CONNECT_TIMEOUT_MS so it always exceeds a
+    // single attempt. A fixed 60s deadline is shorter than the 180s connect
+    // timeout, so the loop would give up after one attempt and never retry the
+    // transient 403 / rollout races above; add a full extra timeout of headroom.
+    async function connectWithRetry(url, deadlineMs = CONNECT_TIMEOUT_MS * 2) {
       const deadline = Date.now() + deadlineMs;
       for (;;) {
         try { return await chromium.connect(url, { timeout: CONNECT_TIMEOUT_MS }); }
@@ -102,15 +106,29 @@ data:
     // race where the proxy hasn't yet seen this pod's IP via WATCH, and (2)
     // connection errors while the proxy Deployment is mid-rollout and the
     // Service endpoint still points at the old (terminating) pod. Retry on both.
-    const RETRYABLE = /403|Forbidden|not labelled|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|socket hang up|fetch failed/i;
-    async function connectWithRetry(deadlineMs = 60000) {
+    const RETRYABLE = /403|Forbidden|not labelled|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|socket hang up|fetch failed|aborted|AbortError|timeout/i;
+    const CONNECT_TIMEOUT_MS = Number(process.env.PW_CONNECT_TIMEOUT_MS || '180000');
+    // Derive the retry budget from CONNECT_TIMEOUT_MS (see client.js) so a single
+    // stalled attempt cannot exhaust the budget before the loop can retry.
+    async function connectWithRetry(deadlineMs = CONNECT_TIMEOUT_MS * 2) {
       const deadline = Date.now() + deadlineMs;
       for (;;) {
-        const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
+        // Bound each connect attempt with an AbortSignal: without it a stalled
+        // fetch (SYN dropped mid-rollout) hangs forever and the loop never
+        // retries. Use a manual controller so we can clear the timer on success
+        // (leaving the live session unbounded) and unref it so a pending attempt
+        // never keeps the process alive after the run finishes.
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(new Error('ETIMEDOUT: MCP connect exceeded ' + CONNECT_TIMEOUT_MS + 'ms')), CONNECT_TIMEOUT_MS);
+        if (timer.unref) timer.unref();
+        const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
+          requestInit: { signal: ac.signal },
+        });
         const client = new Client({ name: 'pw-e2e-mcp', version: '1.0.0' }, { capabilities: {} });
-        try { await client.connect(transport); return client; }
+        try { await client.connect(transport); clearTimeout(timer); return client; }
         catch (e) {
-          const msg = String(e && e.message || e);
+          clearTimeout(timer);
+          const msg = String((e && e.message) || (ac.signal.reason && ac.signal.reason.message) || e);
           try { await transport.close(); } catch (_) {}
           if (Date.now() < deadline && RETRYABLE.test(msg)) {
             await new Promise(r => setTimeout(r, 500));
@@ -133,6 +151,11 @@ data:
     // so we can still assert browser_navigate is advertised; callTool below
     // stays on the strict high-level API, so the actual tool call + its result
     // are still validated end-to-end through the proxy.
+    // The pinned @modelcontextprotocol/sdk@1.30.0 request path calls
+    // resultSchema.safeParse(result) (not .parse) on the response, so the
+    // passthrough MUST supply safeParse returning { success, data }; a bare
+    // { parse } would make client.request throw "safeParse is not a function".
+    // parse is kept too so the shape stays a drop-in for a real Zod schema.
     const passthroughSchema = { parse: (x) => x, safeParse: (x) => ({ success: true, data: x }) };
     (async () => {
       const t0 = Date.now();
