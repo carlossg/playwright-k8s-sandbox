@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +22,16 @@ import (
 
 const (
 	managedByLabel = "playwright-proxy/managed"
+
+	// podUserLabelDomain qualifies the playwright-id label stamped onto the
+	// adopted sandbox pod via SandboxClaim.spec.additionalPodMetadata.
+	// agent-sandbox v0.5.x rejects additionalPodMetadata labels without a
+	// domain prefix ("must have a domain prefix (e.g. 'sandbox.users.io/my-label')
+	// to prevent opting into unintended policy domains"), so a bare key like
+	// "playwright-id" is namespaced under the user-label domain the controller
+	// itself recommends. This is independent of the (bare) label the identify
+	// index reads from client pods.
+	podUserLabelDomain = "sandbox.users.io/"
 )
 
 // SandboxClaim lives in the extensions API group; the core Sandbox / SandboxStatus
@@ -57,6 +68,17 @@ func NewSandboxClaim(dc dynamic.Interface, namespace, templateName, warmPoolName
 }
 
 func claimName(playwrightID string) string { return "pw-" + playwrightID }
+
+// podMetadataLabelKey returns the label key used when asking agent-sandbox to
+// stamp the adopted sandbox pod. A key that already carries a domain prefix is
+// used verbatim; a bare key is qualified under podUserLabelDomain so the claim
+// passes agent-sandbox v0.5.x's additionalPodMetadata validation.
+func (s *SandboxClaim) podMetadataLabelKey() string {
+	if strings.Contains(s.playwrightIDLabelKey, "/") {
+		return s.playwrightIDLabelKey
+	}
+	return podUserLabelDomain + s.playwrightIDLabelKey
+}
 
 func (s *SandboxClaim) Ensure(ctx context.Context, playwrightID string) (Endpoint, error) {
 	name := claimName(playwrightID)
@@ -146,7 +168,7 @@ func (s *SandboxClaim) buildClaim(name, playwrightID string) *unstructured.Unstr
 			},
 			"additionalPodMetadata": map[string]any{
 				"labels": map[string]any{
-					s.playwrightIDLabelKey: playwrightID,
+					s.podMetadataLabelKey(): playwrightID,
 				},
 			},
 		},

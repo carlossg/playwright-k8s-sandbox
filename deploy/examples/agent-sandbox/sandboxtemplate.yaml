@@ -10,7 +10,7 @@
 # registry your cluster can pull from, then replace the image reference here.
 #
 # Configure the proxy with BACKEND=sandboxclaim and WARMPOOL_NAME=playwright.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: playwright
@@ -30,7 +30,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: playwright
-          image: localhost:5001/playwright-substrate:slim-1.49.1
+          image: localhost:5001/playwright-substrate:slim-1.53.0
           command: ["node", "/server.js"]
           env:
             # Dockerfile ENV isn't always propagated; set NODE_PATH so node
