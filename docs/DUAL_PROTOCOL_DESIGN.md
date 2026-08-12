@@ -23,7 +23,10 @@ single routing decision.
   still dials `Endpoint.Addr()`.
 - `config.SandboxMCPPort` (env `SANDBOX_MCP_PORT`, optional) + `deploy/proxy.yaml`.
 - Only the `sandboxclaim` backend populates `MCPPort` today (in scope);
-  substrate/isola/kars leave it 0 and behave exactly as before.
+  substrate/isola/kars leave it 0, so `MCPAddr()` falls back to the WS port and
+  their routing is unchanged (single-port). The shared slim image they run is
+  bumped to Playwright 1.53.0; its native-WS path stays covered by `client.js`
+  (also exercised by `test/bench.sh`).
 
 **Implemented (sandbox image + e2e, test-only):**
 
@@ -106,7 +109,8 @@ routing decision and needs no in-container dispatcher — the proxy already mode
 
 ### Reference
 
-- `@playwright/mcp` HTTP transport: `npx @playwright/mcp@latest --port <port>`;
+- `@playwright/mcp` HTTP transport: `npx @playwright/mcp@0.0.29 --port <port>`
+  (pinned to match `playwright@1.53.0`; see [As implemented](#as-implemented));
   MCP endpoint at `/mcp` (streamable-http), legacy SSE at `/sse` + `/messages`.
 - Relevant CLI flags: `--port`, `--host` (use `0.0.0.0`), `--headless`,
   `--browser` (pin to `chromium` — see [As implemented](#as-implemented)),
@@ -175,7 +179,11 @@ Considered and rejected:
 
 ## As implemented
 
-Test-only; no additional Go changes beyond the proxy two-port routing above.
+The Go changes are the two-port routing listed under **Implemented (proxy, Go)**
+at the top of this document (`backend.Endpoint.MCPPort`/`MCPAddr()`,
+`config.SandboxMCPPort`, the `sandboxclaim` backend populating `MCPPort`, and
+`proxy.go` dialing `MCPAddr()` for plain HTTP). Everything in (a)–(e) below is
+test-only.
 
 **(a) Image (`test/playwright-substrate.Dockerfile`)**
 - Global npm install pins `playwright` + `playwright-core` to **1.53.0** and adds

@@ -23,6 +23,10 @@ spec:
         - name: client
           image: PLAYWRIGHT_IMAGE
           imagePullPolicy: Never
+          # Pure Playwright WS client (no local browser), so it needs no extra
+          # privileges; drop privilege escalation to satisfy hardened admission.
+          securityContext:
+            allowPrivilegeEscalation: false
           command: ["node", "/scripts/client.js"]
           env:
             # Dockerfile ENV isn't propagated by every runtime; set explicitly
