@@ -16,7 +16,7 @@
 # cluster can pull from and replace the image reference below.
 #
 # Configure the proxy with BACKEND=sandboxclaim and WARMPOOL_NAME=playwright-openshell.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: playwright-openshell
@@ -34,7 +34,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: playwright
-          image: localhost:5001/playwright-substrate:slim-1.49.1
+          image: localhost:5001/playwright-substrate:slim-1.53.0
           command: ["node", "/server.js"]
           env:
             - name: NODE_PATH

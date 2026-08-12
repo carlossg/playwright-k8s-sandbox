@@ -1,7 +1,7 @@
 # Lightweight upstream used by the smoke test in place of the real Playwright image.
 # traefik/whoami is ~5MB, supports HTTP and WebSocket, and echoes back the pod's
 # hostname so we can verify routing landed on the right sandbox pod.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: NAME
