@@ -119,7 +119,7 @@ routing decision and needs no in-container dispatcher — the proxy already mode
 The sandbox runs two independent servers on two ports; the proxy routes to the
 correct one per protocol:
 
-```
+```text
         ┌─ playwright-proxy ─┐
         │ isWebsocketUpgrade │
    WS ──┤                    ├── plain HTTP (MCP)
@@ -140,7 +140,7 @@ more complex than simply exposing a second port. Kept here for reference:
 
 A single container, three parts, one public port (9222):
 
-```
+```text
                           :9222 (SANDBOX_PORT, 0.0.0.0)  ← proxy dials here
                                     │
                          ┌── front dispatcher (Node http.Server) ──┐
