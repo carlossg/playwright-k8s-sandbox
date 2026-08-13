@@ -19,6 +19,7 @@
 //   MCP_PORT         MCP-over-HTTP listen port; when unset, MCP is not started
 //                    (single-protocol WS-only mode, e.g. substrate/gVisor)
 const path = require('path');
+const net = require('net');
 const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 
@@ -60,8 +61,40 @@ function startMcp() {
   return child;
 }
 
+// Poll a TCP port until it accepts a connection (or the deadline passes).
+// @playwright/mcp binds its HTTP listener asynchronously after spawn, so we
+// gate the WS launch below on the MCP port actually being up.
+function waitForPort(port, host, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const sock = net.connect({ port, host });
+      sock.once('connect', () => { sock.destroy(); resolve(); });
+      sock.once('error', () => {
+        sock.destroy();
+        if (Date.now() >= deadline) {
+          reject(new Error('timed out waiting for ' + host + ':' + port));
+        } else {
+          setTimeout(attempt, 200);
+        }
+      });
+    };
+    attempt();
+  });
+}
+
 (async () => {
-  if (MCP_PORT) startMcp();
+  if (MCP_PORT) {
+    startMcp();
+    // Kubernetes readiness gates on the WS port (PORT) only. To keep that a
+    // valid proxy for "both listeners up", make sure the MCP port is actually
+    // accepting connections BEFORE we launch the WS server that flips the pod
+    // ready — otherwise the proxy could route an MCP request to a not-yet-bound
+    // 9223. chromium.launchServer below then binds PORT strictly after this.
+    console.log('waiting for @playwright/mcp to listen', { port: MCP_PORT });
+    await waitForPort(MCP_PORT, '127.0.0.1', 60000);
+    console.log('@playwright/mcp is listening', { port: MCP_PORT });
+  }
   console.log('launching chromium', { port: PORT, wsPath: PATH, args: ARGS });
   const server = await chromium.launchServer({
     port: PORT,

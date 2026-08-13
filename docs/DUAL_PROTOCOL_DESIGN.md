@@ -195,18 +195,22 @@ test-only.
   `PLAYWRIGHT_BROWSERS_PATH`. Exposes `9222` (WS) and `9223` (MCP).
 
 **(b) Server (`test/playwright-substrate-server.js`)**
-- Always launches `chromium.launchServer` on `PORT`. When `MCP_PORT` is set, it
-  also spawns `@playwright/mcp --port $MCP_PORT --host 0.0.0.0 --headless
-  --isolated --no-sandbox --browser chromium`. `--browser chromium` is required:
-  `@playwright/mcp` defaults to the branded `chrome` channel
-  (`/opt/google/chrome/chrome`), which the slim image does not ship.
-- When `MCP_PORT` is unset the image is WS-only (unchanged for substrate/gVisor).
+- When `MCP_PORT` is set it spawns `@playwright/mcp --port $MCP_PORT --host
+  0.0.0.0 --headless --isolated --no-sandbox --browser chromium`, then **waits
+  for the MCP port to accept a TCP connection** (`waitForPort`) before launching
+  `chromium.launchServer` on `PORT`. This ordering is what makes the WS-only
+  readiness gate below correct: the WS port binds strictly after the MCP port is
+  already up. `--browser chromium` is required: `@playwright/mcp` defaults to the
+  branded `chrome` channel (`/opt/google/chrome/chrome`), which the slim image
+  does not ship.
+- When `MCP_PORT` is unset the image is WS-only (unchanged for substrate/gVisor)
+  and launches `chromium.launchServer` directly.
 
 **(c) Sandbox manifest (`test/playwright-sandboxtemplate.yaml`)**
 - `PORT=9222`, `MCP_PORT=9223`, both container ports exposed. Readiness gates on
-  the WS port (9222): `@playwright/mcp` binds its HTTP port immediately, whereas
-  `chromium.launchServer` binds only after launching the browser, so a ready WS
-  port implies the MCP port is already up.
+  the WS port (9222) only, which is sufficient because `server.js` waits for the
+  MCP port (9223) to accept connections before it binds the WS port (see (b)):
+  a ready WS port therefore implies the MCP port is already up.
 - `test/playwright-warmpool.yaml` replicas = 3 (WS alpha + WS beta + MCP gamma each
   claim a distinct sandbox).
 
