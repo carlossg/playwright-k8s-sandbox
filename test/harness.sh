@@ -682,6 +682,7 @@ cmd_test_kars() {
   for id in alpha beta; do
     kubectl $ctx -n "$ns" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
     sed -e "s/NAMESPACE/$ns/g" -e "s/CLIENTID/$id/g" \
+      -e "s|image: PLAYWRIGHT_IMAGE|image: $PLAYWRIGHT_IMAGE|" \
       "$HERE/playwright-client-job.yaml" | kubectl $ctx apply -f -
   done
 
@@ -843,6 +844,7 @@ cmd_test_isola() {
   for id in alpha beta; do
     kubectl $ctx -n "$ns" delete job "playwright-e2e-$id" --ignore-not-found --wait=true >/dev/null
     sed -e "s/NAMESPACE/$ns/g" -e "s/CLIENTID/$id/g" \
+      -e "s|image: PLAYWRIGHT_IMAGE|image: $PLAYWRIGHT_IMAGE|" \
       "$HERE/playwright-client-job.yaml" | kubectl $ctx apply -f -
   done
 

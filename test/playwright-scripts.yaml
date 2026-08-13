@@ -179,9 +179,14 @@ data:
         console.error('FAIL [' + ID + '] empty navigate result');
         process.exit(1);
       }
-      // Best-effort: the whoami page renders as plain text, so its snapshot
-      // usually carries "Hostname: <pod>". Assert it when present.
+      // The whoami page renders as plain text, so its snapshot carries
+      // "Hostname: <pod>". Require it — a nonempty browser error page must not
+      // pass as success — mirroring the WS test's assertion in client.js.
       const m = out.match(/Hostname:\s*([^\s<"]+)/);
+      if (!m) {
+        console.error('FAIL [' + ID + '] no Hostname in navigate result: ' + out.slice(0, 200));
+        process.exit(1);
+      }
       const timing = {
         id: ID,
         protocol: 'mcp',
@@ -190,7 +195,7 @@ data:
         navigate_ms: t3 - t2,
         total_ms:   t3 - t0,
         tool_count: names.length,
-        hostname:   m ? m[1] : 'n/a',
+        hostname:   m[1],
       };
       console.log('BENCH ' + JSON.stringify(timing));
       await client.close();
