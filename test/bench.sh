@@ -28,7 +28,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-SLIM_IMAGE_TAG="localhost:5001/playwright-substrate:slim-1.49.1"
+SLIM_IMAGE_TAG="localhost:5001/playwright-substrate:slim-1.53.0"
 KARS_CLUSTER="${KARS_CLUSTER:-kars-playwright}"
 KARS_NS="${KARS_NS:-pw-kars}"
 ISOLA_CLUSTER="${ISOLA_CLUSTER:-isola-playwright}"
@@ -151,7 +151,7 @@ ensure_bench_deps() {
 ensure_image_in_cluster() {
   local cluster=$1
   if ! docker exec "${cluster}-control-plane" ctr --namespace=k8s.io images ls -q 2>/dev/null \
-       | grep -q "playwright-substrate:slim-1.49.1\|playwright-substrate@sha256"; then
+       | grep -q "playwright-substrate:slim-1.53.0\|playwright-substrate@sha256"; then
     log "loading $SLIM_IMAGE_TAG into kind cluster $cluster"
     docker save "$SLIM_IMAGE_TAG" | docker exec -i "${cluster}-control-plane" \
       ctr --namespace=k8s.io images import --no-unpack - >/dev/null

@@ -2,9 +2,12 @@
 #
 # The container runs the baked slim image (built from
 # proxy/test/playwright-substrate.Dockerfile) which launches a Chromium
-# WebSocket server on the port given by PORT. server.js is baked into the
-# image; no ConfigMap mount required.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+# WebSocket server on PORT and — because MCP_PORT is set — @playwright/mcp on
+# MCP_PORT. server.js is baked into the image; no ConfigMap mount required.
+#
+# v1beta1 is the storage version from agent-sandbox v0.5.0 onward; older
+# releases (through v0.4.6) served only v1alpha1.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: NAME
@@ -22,7 +25,7 @@ spec:
         - name: playwright
           # Shared slim image; tag is the kind-local registry. The harness
           # builds + loads it into the kind cluster, so imagePullPolicy=Never.
-          image: localhost:5001/playwright-substrate:slim-1.49.1
+          image: localhost:5001/playwright-substrate:slim-1.53.0
           imagePullPolicy: Never
           command: ["node", "/server.js"]
           env:
@@ -34,6 +37,11 @@ spec:
               value: /ms-playwright
             - name: PORT
               value: "9222"
+            # MCP_PORT starts @playwright/mcp on a second port for the MCP
+            # integration test. The proxy dials this port for plain HTTP
+            # (SANDBOX_MCP_PORT) while WS upgrades go to PORT.
+            - name: MCP_PORT
+              value: "9223"
             - name: CHROMIUM_ARGS
               # --single-process is required under gVisor (substrate) but breaks
               # browserContext.newPage() under regular containerd because the
@@ -42,7 +50,13 @@ spec:
           ports:
             - name: playwright
               containerPort: 9222
+            - name: mcp
+              containerPort: 9223
           readinessProbe:
+            # Gate on the WS port: @playwright/mcp binds its HTTP port
+            # immediately at startup, whereas chromium.launchServer only binds
+            # after launching a browser process — so a ready WS port is the
+            # later signal and implies the MCP port is already up.
             tcpSocket: { port: 9222 }
             periodSeconds: 2
             initialDelaySeconds: 10

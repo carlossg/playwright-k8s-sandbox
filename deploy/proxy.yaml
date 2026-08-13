@@ -58,7 +58,13 @@ spec:
             # - name: SANDBOX_TEMPLATE_NAME
             #   value: "playwright"      # defaults to WARMPOOL_NAME
             - name: SANDBOX_PORT
-              value: "9222"              # Playwright server / MCP port
+              value: "9222"              # native Playwright WebSocket port (chromium.launchServer)
+            # SANDBOX_MCP_PORT is the sandbox's MCP-over-HTTP port. @playwright/mcp
+            # cannot share a process/port with chromium.launchServer, so a
+            # dual-protocol sandbox listens on two ports; the proxy dials this one
+            # for plain HTTP. Omit for single-port sandboxes (falls back to SANDBOX_PORT).
+            # - name: SANDBOX_MCP_PORT
+            #   value: "9223"
             - name: IDLE_TTL
               value: "10m"
             - name: IDLE_CHECK_INTERVAL

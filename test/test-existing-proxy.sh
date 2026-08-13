@@ -138,7 +138,7 @@ deploy_client() {
   # Create the job from template
   sed -e "s/NAMESPACE/$NAMESPACE/g" \
       -e "s/CLIENTID/$client_id/g" \
-      -e "s|localhost:5001/playwright-substrate:slim-1.49.1|$PLAYWRIGHT_IMAGE|g" \
+      -e "s|image: PLAYWRIGHT_IMAGE|image: $PLAYWRIGHT_IMAGE|g" \
       -e "s|imagePullPolicy: Never|imagePullPolicy: IfNotPresent|g" \
       -e "s/playwright-e2e-/playwright-test-/g" \
       "$HERE/playwright-client-job.yaml" | kubectl apply -f -
