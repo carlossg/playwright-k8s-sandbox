@@ -29,7 +29,22 @@ const ARGS = (process.env.CHROMIUM_ARGS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-const MCP_PORT = process.env.MCP_PORT ? Number(process.env.MCP_PORT) : 0;
+// Only an absent MCP_PORT selects WS-only mode; any value that IS set must be a
+// valid TCP port, otherwise a typo (empty, non-numeric, zero, fractional, or
+// out-of-range) would silently fall back to WS-only or hand @playwright/mcp a
+// bogus --port. Fail fast instead.
+function parseMcpPort(raw) {
+  if (raw === undefined) return 0; // unset → single-protocol WS-only mode
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(
+      'invalid MCP_PORT ' + JSON.stringify(raw) +
+        ' (expected integer 1..65535, or unset for WS-only)'
+    );
+  }
+  return n;
+}
+const MCP_PORT = parseMcpPort(process.env.MCP_PORT);
 
 // Spawn @playwright/mcp on MCP_PORT. Resolve the CLI through the installed
 // package (NODE_PATH points at the global modules dir); the package only
@@ -68,16 +83,35 @@ function waitForPort(port, host, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const attempt = () => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        reject(new Error('timed out waiting for ' + host + ':' + port));
+        return;
+      }
       const sock = net.connect({ port, host });
-      sock.once('connect', () => { sock.destroy(); resolve(); });
-      sock.once('error', () => {
+      // Bound each attempt by the time left until the deadline: a silently
+      // dropped SYN never emits 'connect' or 'error', so without this the
+      // socket — and this promise — could stay pending well past timeoutMs.
+      sock.setTimeout(remaining);
+      let done = false;
+      const retry = () => {
+        if (done) return; // 'timeout' + 'error' can both fire; settle once
+        done = true;
         sock.destroy();
         if (Date.now() >= deadline) {
           reject(new Error('timed out waiting for ' + host + ':' + port));
         } else {
           setTimeout(attempt, 200);
         }
+      };
+      sock.once('connect', () => {
+        if (done) return;
+        done = true;
+        sock.destroy();
+        resolve();
       });
+      sock.once('timeout', retry);
+      sock.once('error', retry);
     };
     attempt();
   });
